@@ -5,6 +5,31 @@ agents**: a frontier "main" agent and a cheap "sidekick" agent that each keep th
 own warm context, so delegation passes compact briefs instead of swapping models on
 one transcript.
 
+## Status: MVP
+
+This is an **MVP build** — a working architecture and evaluation harness, validated on
+self-authored toy tasks. Read this section before reading the numbers.
+
+- **What it is.** A runnable main+sidekick harness implementing **Idea A (read-only
+  Scout)**, with per-role token/cost accounting, a hard budget guard, a bundled native
+  task set plus a SWE-bench Verified loader, and a "would-you-merge" quality judge.
+- **What the MVP proves (verified live).** The machinery works end-to-end: two agents
+  with separate warm-cache contexts, the Scout delegation loop, the cost split, and the
+  budget guard all run against real models. All three variants resolve the native tasks;
+  total spend for the live validation was **~$0.30**.
+- **What it does NOT yet show.** The Fusion *cost win*. The two native tasks
+  (`eval/tasks_data/slugify`, `eval/tasks_data/median`) are **deliberately trivial
+  bugs I hand-wrote** to exercise the loop cheaply — not a real benchmark. Because the
+  files are tiny, reading them directly is nearly free, so on this set the Scout is
+  *more* expensive than the frontier baseline (delegation overhead with no offsetting
+  saving). The Scout only pays off when file-reading tokens dominate the frontier
+  context — i.e. real repositories.
+- **Next (to actually test the thesis).** Run the **SWE-bench Verified slice**
+  (`--source swebench`) where a frontier agent burns large token counts reading files,
+  then layer on **Idea C (confidence-gated routing)**.
+
+So "MVP" here means *proven machinery on toy tasks*, **not** *proven cost savings*.
+
 This first build implements **Idea A — the read-only "Scout" sidekick**: the main
 agent (Sonnet 5) never reads files directly. Instead it asks a Haiku Scout to explore
 and return a compact, cited `file:line` map. The frontier model pays frontier-token
