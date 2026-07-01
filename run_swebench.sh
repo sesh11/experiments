@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
 #
-# Run the Scout-vs-frontier comparison on real SWE-bench Verified instances.
-# This is the large-context test that the Cloud/Web sandbox could not run
-# (HuggingFace + arbitrary GitHub clones are blocked there). Locally it works.
+# THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified tasks.
 #
-#   git clone <this repo> && cd experiments
+# Decides whether the Scout architecture is worth pursuing:
+#   * scout main$ meaningfully LOWER than frontier_only at ~equal resolve  -> thesis lives
+#   * otherwise                                                            -> stop, rethink
+#
+# Resolution is scored the SWE-bench way (this is NOT a bare `pytest -q`):
+# each instance's gold test patch is applied and its FAIL_TO_PASS tests must
+# pass, with sampled PASS_TO_PASS staying green. Instances whose env/tests
+# don't validate are skipped BEFORE any LLM spend, so `resolved` means something.
+#
+# Usage (from a machine with open network — not the Claude Code web sandbox):
 #   export ANTHROPIC_API_KEY=sk-ant-...
-#   ./run_swebench.sh                 # defaults: 6 instances, $15 budget
-#   ./run_swebench.sh 8 20            # 8 instances, $20 budget
+#   ./run_swebench.sh                 # 15 instances, $25 budget cap
+#   ./run_swebench.sh 10 15           # 10 instances, $15 cap
 #
-# Requires: python3, git, and Docker-free (per-instance venvs are built for you).
+# Notes:
+#   * python3.11 or 3.10 recommended on PATH (old 2019-23 repos break on 3.12+).
+#   * First run is slow: clones repos + builds a venv per instance (cached in
+#     ~/.cache/fusion_swebench for reruns).
 set -euo pipefail
 
-LIMIT="${1:-6}"
-BUDGET="${2:-15}"
+LIMIT="${1:-15}"
+BUDGET="${2:-25}"
 
 if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo "ERROR: set ANTHROPIC_API_KEY first  (export ANTHROPIC_API_KEY=sk-ant-...)" >&2
@@ -29,14 +39,26 @@ source .venv/bin/activate
 pip install --quiet -U pip
 pip install --quiet -r requirements.txt pytest
 
-echo "==> Running SWE-bench slice: ${LIMIT} instances, \$${BUDGET} budget cap"
-echo "    (first run clones repos + builds a venv per instance; that part is slow)"
-python -m eval.run_eval --source swebench --limit "$LIMIT" --budget "$BUDGET"
+echo "==> Falsifying run: ${LIMIT} instances, \$${BUDGET} cap, variants: frontier_only scout"
+echo "    (env build + validation gate happens first; skipped instances are printed with reasons)"
+python -m eval.run_eval --source swebench --limit "$LIMIT" --budget "$BUDGET" \
+  --per-task 1.5 --max-steps 20 --variants frontier_only scout
 
 echo "==> Report"
 python -m eval.report
 
-echo
-echo "Done. See results/summary.csv and results/pareto.png"
-echo "Headline to read: does 'scout' have a lower main\$ per task than 'frontier_only'"
-echo "at a comparable resolve rate? That is the Fusion 'match quality, cut cost' claim."
+cat <<'EOF'
+
+================================ DECISION RULE ================================
+Read results/summary.csv (or the table above). Compare, per task:
+
+    scout.main$   vs   frontier_only.main$      at comparable resolve rate
+
+* scout main$ meaningfully lower AND resolve within ~1 task of frontier
+    -> the Scout thesis holds on real repos; build Idea C (routing) next.
+* scout main$ not lower, or resolve clearly worse
+    -> the architecture doesn't pay for itself; STOP and rethink before
+       building anything else.
+Artifacts: results/summary.csv, results/summary.json, results/pareto.png
+===============================================================================
+EOF

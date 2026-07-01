@@ -3,127 +3,217 @@
 This is the piece the Cloud/Web sandbox couldn't run: HuggingFace and arbitrary
 GitHub clones are blocked there. On a normal machine it works.
 
-Per instance it: clones the repo @ base_commit, builds a venv, `pip install -e .`,
-lets the agent edit the source in place, then scores the SWE-bench way — apply the
-dataset's gold *test* patch and require the specific FAIL_TO_PASS tests to pass and
-PASS_TO_PASS tests to stay green. Instances whose env won't build are skipped.
+Per instance: clone repo @ base_commit, build a venv, `pip install -e .`, then a
+**validation gate** — apply the dataset's gold test patch and require the
+FAIL_TO_PASS tests to collect and FAIL at base. Instances that don't validate
+(broken env, non-pytest test ids, already-passing tests) are skipped with a
+printed reason BEFORE any LLM spend, so "resolved" is trustworthy by construction.
 
-Best-effort: without the official per-version Docker specs, some installs will fail;
-those instances are skipped and reported rather than faked.
+Scoring after an agent run: apply the gold test patch, run FAIL_TO_PASS (must all
+pass) and a deterministic sample of <=30 PASS_TO_PASS (must stay green) as separate
+pytest invocations, then revert the patch.
 """
 
 from __future__ import annotations
 
 import json
+import random
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
-from fusion.workspace import Workspace
-
-# Repos that install cleanly from source with plain pip (no C/build toolchain).
-# Avoid matplotlib / scikit-learn / seaborn / astropy (compiled deps).
+# Pure-python, pip-installable repos whose SWE-bench test ids are pytest-style.
+# django/django is excluded: its FAIL_TO_PASS ids use the Django-runner format
+# ("test_x (app.Class)"), not pytest node ids.
 ALLOWLIST = [
     "psf/requests", "pallets/flask", "pytest-dev/pytest", "pydata/xarray",
-    "pylint-dev/pylint", "sphinx-doc/sphinx", "sympy/sympy", "django/django",
+    "pylint-dev/pylint", "sphinx-doc/sphinx", "sympy/sympy",
 ]
 
+P2P_SAMPLE = 30          # cap PASS_TO_PASS ids per instance (argv + runtime)
+TEST_TIMEOUT = 600       # seconds, agent-facing and scoring runs
 CACHE = Path.home() / ".cache" / "fusion_swebench"
+
+# Untracked files we must never `git clean` away inside an instance dir.
+_KEEP = ["-e", ".venv", "-e", ".ready"]
 
 
 def _run(cmd, cwd=None, timeout=900):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
-def _prepare(row: dict) -> dict | None:
-    """Clone + venv + install one instance. Returns a task dict, or None if it won't build."""
+def _pick_python() -> str:
+    """Old (2019-23) codebases often break on 3.12+; prefer 3.11/3.10."""
+    for exe in ("python3.11", "python3.10", "python3"):
+        if shutil.which(exe):
+            return exe
+    return sys.executable
+
+
+def _ids(raw) -> list[str]:
+    return json.loads(raw) if isinstance(raw, str) else list(raw)
+
+
+def _apply_gold(d: Path, test_patch: str):
+    """Apply the gold test patch from a temp file OUTSIDE the repo. Returns
+    (ok, revert_fn)."""
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as fh:
+        fh.write(test_patch)
+        pfile = fh.name
+    ok = _run(["git", "apply", pfile], cwd=d).returncode == 0
+    if not ok:
+        ok = _run(["git", "apply", "--3way", pfile], cwd=d).returncode == 0
+
+    def revert():
+        _run(["git", "checkout", "--quiet", "--", "."], cwd=d)
+        _run(["git", "clean", "-fdq", *_KEEP], cwd=d)
+        Path(pfile).unlink(missing_ok=True)
+
+    return ok, revert
+
+
+def _pytest(venv_py: str, d: Path, ids: list[str], timeout=TEST_TIMEOUT):
+    return _run([venv_py, "-m", "pytest", "-q", "--no-header",
+                 "-p", "no:cacheprovider", *ids], cwd=d, timeout=timeout)
+
+
+# --- env build ---------------------------------------------------------------
+def _build_env(row: dict) -> tuple[Path, str] | None:
     iid = row["instance_id"]
     d = CACHE / iid
     venv_py = d / ".venv" / "bin" / "python"
-    marker = d / ".ready"
-    if marker.exists() and venv_py.exists():
-        return _task(row, d, venv_py)
+    if (d / ".ready").exists() and venv_py.exists():
+        return d, str(venv_py)
 
     try:
         CACHE.mkdir(parents=True, exist_ok=True)
         if not (d / ".git").exists():
-            _run(["git", "clone", "--quiet",
-                  f"https://github.com/{row['repo']}.git", str(d)])
+            r = _run(["git", "clone", "--quiet",
+                      f"https://github.com/{row['repo']}.git", str(d)])
+            if r.returncode != 0:
+                print(f"  [skip] {iid}: clone failed")
+                return None
         _run(["git", "checkout", "--quiet", "--force", row["base_commit"]], cwd=d)
-        _run(["git", "clean", "-fdq"], cwd=d)
+        _run(["git", "clean", "-fdq", *_KEEP], cwd=d)
         if not venv_py.exists():
-            _run(["python3", "-m", "venv", str(d / ".venv")])
-        _run([str(venv_py), "-m", "pip", "install", "--quiet", "-U", "pip", "wheel"])
-        # Try common extras, then fall back to a bare editable install.
+            _run([_pick_python(), "-m", "venv", str(d / ".venv")])
+        _run([str(venv_py), "-m", "pip", "install", "--quiet", "-U", "pip", "wheel", "setuptools"])
         for spec in ("-e .[test]", "-e .[dev]", "-e .[testing]", "-e ."):
-            r = _run([str(venv_py), "-m", "pip", "install", "--quiet", *spec.split()], cwd=d)
-            if r.returncode == 0:
+            if _run([str(venv_py), "-m", "pip", "install", "--quiet", *spec.split()],
+                    cwd=d).returncode == 0:
                 break
         _run([str(venv_py), "-m", "pip", "install", "--quiet", "pytest"])
-        # Sanity: pytest importable?
-        r = _run([str(venv_py), "-c", "import pytest"], cwd=d)
-        if r.returncode != 0:
-            print(f"  [skip] {iid}: env build failed ({r.stderr.strip()[:120]})")
+        if _run([str(venv_py), "-c", "import pytest"], cwd=d).returncode != 0:
+            print(f"  [skip] {iid}: env build failed (pytest not importable)")
             return None
-        marker.write_text("ok")
-        return _task(row, d, venv_py)
+        (d / ".ready").write_text("ok")
+        return d, str(venv_py)
     except Exception as exc:  # noqa: BLE001
         print(f"  [skip] {iid}: {type(exc).__name__}: {exc}")
         return None
 
 
-def _task(row: dict, d: Path, venv_py: Path) -> dict:
-    f2p = json.loads(row["FAIL_TO_PASS"]) if isinstance(row["FAIL_TO_PASS"], str) else row["FAIL_TO_PASS"]
-    p2p = json.loads(row["PASS_TO_PASS"]) if isinstance(row["PASS_TO_PASS"], str) else row["PASS_TO_PASS"]
-    return {
-        "instance_id": row["instance_id"],
-        "template_dir": str(d),
-        "in_place": True,                       # edit the clone directly (egg-link)
-        "test_cmd": f"{venv_py} -m pytest -q",  # agent's own check (existing suite)
-        "problem_statement": row["problem_statement"],
-        "_dir": str(d), "_venv": str(venv_py),
-        "_test_patch": row["test_patch"], "_f2p": f2p, "_p2p": p2p,
-        "reset": _reset, "scorer": _scorer,
-    }
+# --- validation gate ---------------------------------------------------------
+def _validate(row: dict, d: Path, venv_py: str) -> str | None:
+    """Return a skip-reason, or None if the instance is scoreable.
+
+    Requirement: with the gold test patch applied, the FAIL_TO_PASS ids must
+    collect and FAIL at base (pytest exit code 1)."""
+    ok, revert = _apply_gold(d, row["test_patch"])
+    if not ok:
+        revert()
+        return "gold test patch does not apply"
+    try:
+        rc = _pytest(venv_py, d, _ids(row["FAIL_TO_PASS"])).returncode
+    except subprocess.TimeoutExpired:
+        revert()
+        return "F2P run timed out"
+    revert()
+    if rc == 0:
+        return "F2P already passes at base (bad instance/env)"
+    if rc in (4, 5):
+        return "F2P ids not collectable (non-pytest format or missing)"
+    if rc in (2, 3):
+        return f"pytest errored (rc={rc}) — env likely broken"
+    return None  # rc == 1: tests ran and failed, as they should
+
+
+# --- scoring -----------------------------------------------------------------
+def _scorer(task: dict) -> tuple[bool, str]:
+    d = Path(task["_dir"])
+    venv = task["_venv"]
+    ok, revert = _apply_gold(d, task["_test_patch"])
+    if not ok:
+        revert()
+        return False, "gold test patch failed to apply (agent edited test files?)"
+    try:
+        f2p_rc = _pytest(venv, d, task["_f2p"]).returncode
+        p2p = task["_p2p"]
+        if p2p:
+            p2p_rc = _pytest(venv, d, p2p).returncode
+        else:
+            p2p_rc = 0
+    except subprocess.TimeoutExpired:
+        revert()
+        return False, "scoring run timed out"
+    revert()
+    f2p_ok, p2p_ok = f2p_rc == 0, p2p_rc == 0
+    detail = (f"f2p({len(task['_f2p'])}) {'PASS' if f2p_ok else 'FAIL'}; "
+              f"p2p({len(p2p)} sampled) {'PASS' if p2p_ok else 'FAIL'}")
+    return f2p_ok and p2p_ok, detail
 
 
 def _reset(task: dict) -> None:
     d = task["_dir"]
-    _run(["git", "checkout", "--quiet", "--", "."], cwd=d)
-    _run(["git", "clean", "-fdq"], cwd=d)
+    _run(["git", "checkout", "--quiet", "--force", task["_base_commit"]], cwd=d)
+    _run(["git", "clean", "-fdq", *_KEEP], cwd=d)
 
 
-def _scorer(task: dict) -> bool:
-    """Apply gold test patch; require FAIL_TO_PASS + PASS_TO_PASS to pass."""
-    d = Path(task["_dir"])
-    patch = d / ".gold_test.patch"
-    patch.write_text(task["_test_patch"])
-    applied = _run(["git", "apply", str(patch)], cwd=d).returncode == 0
-    if not applied:
-        _run(["git", "apply", "--3way", str(patch)], cwd=d)
-    ids = list(task["_f2p"]) + list(task["_p2p"])
-    try:
-        r = _run([task["_venv"], "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", *ids],
-                 cwd=d, timeout=600)
-        resolved = r.returncode == 0
-    except Exception:
-        resolved = False
-    _run(["git", "apply", "-R", str(patch)], cwd=d)  # revert gold tests
-    return resolved
+def _task(row: dict, d: Path, venv_py: str) -> dict:
+    p2p_all = sorted(_ids(row["PASS_TO_PASS"]))
+    p2p = (random.Random(0).sample(p2p_all, P2P_SAMPLE)
+           if len(p2p_all) > P2P_SAMPLE else p2p_all)
+    return {
+        "instance_id": row["instance_id"],
+        "template_dir": str(d),
+        "in_place": True,
+        "test_cmd": f"{venv_py} -m pytest -q -p no:cacheprovider",
+        "test_timeout": TEST_TIMEOUT,
+        "problem_statement": row["problem_statement"],
+        "_dir": str(d), "_venv": venv_py, "_base_commit": row["base_commit"],
+        "_test_patch": row["test_patch"],
+        "_f2p": _ids(row["FAIL_TO_PASS"]), "_p2p": p2p,
+        "reset": _reset, "scorer": _scorer,
+    }
 
 
-def load(limit: int = 6) -> list[dict]:
+# --- loader ------------------------------------------------------------------
+def load(limit: int = 15) -> list[dict]:
     from datasets import load_dataset  # needs HF network (works locally)
     ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
     rank = {r: i for i, r in enumerate(ALLOWLIST)}
-    rows = [r for r in ds if r["repo"] in rank]
-    rows.sort(key=lambda r: rank[r["repo"]])       # small/clean repos first
+    rows = sorted((r for r in ds if r["repo"] in rank),
+                  key=lambda r: (rank[r["repo"]], r["instance_id"]))
+    # Oversample so validation-gate skips don't starve the run.
+    candidates = rows[: limit * 3]
     tasks: list[dict] = []
-    for row in rows:
+    for row in candidates:
         if len(tasks) >= limit:
             break
-        print(f"Preparing {row['instance_id']} ({row['repo']}) ...")
-        t = _prepare(row)
-        if t:
-            tasks.append(t)
-    print(f"Prepared {len(tasks)}/{limit} instances.")
+        iid = row["instance_id"]
+        print(f"Preparing {iid} ({row['repo']}) ...", flush=True)
+        built = _build_env(row)
+        if not built:
+            continue
+        d, venv_py = built
+        reason = _validate(row, d, venv_py)
+        if reason:
+            print(f"  [skip] {iid}: {reason}")
+            continue
+        print(f"  [ok]   {iid}: env valid, F2P fails at base as expected")
+        tasks.append(_task(row, d, venv_py))
+    print(f"\nPrepared {len(tasks)}/{limit} scoreable instances "
+          f"(from {len(candidates)} candidates).")
     return tasks

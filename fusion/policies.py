@@ -26,6 +26,7 @@ class PolicyResult:
     ledger: dict
     budget_hit: bool = False
     error: str = ""
+    resolve_detail: str = ""
 
 
 def _task_prompt(task: dict) -> str:
@@ -41,8 +42,10 @@ def _make_ws(task: dict) -> Workspace:
     if task.get("in_place"):
         if task.get("reset"):
             task["reset"](task)
-        return Workspace(task["template_dir"], task["test_cmd"])
-    return Workspace.from_template(task["template_dir"], task["test_cmd"])
+        return Workspace(task["template_dir"], task["test_cmd"],
+                         use_git=True, test_timeout=task.get("test_timeout", 600))
+    return Workspace.from_template(task["template_dir"], task["test_cmd"],
+                                   test_timeout=task.get("test_timeout", 120))
 
 
 def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
@@ -105,19 +108,27 @@ def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
     except Exception as exc:  # keep the run alive; record the failure
         err = f"{type(exc).__name__}: {exc}"
         summary = ""
+    # Capture the agent's diff BEFORE scoring: the scorer applies/reverts the
+    # gold test patch and must not pollute the recorded change.
+    diff = ws.diff()
     # swebench tasks score the SWE-bench way (gold test patch + FAIL/PASS_TO_PASS);
     # native tasks just run their own test command.
+    detail = ""
     if task.get("scorer"):
         try:
-            resolved = bool(task["scorer"](task))
+            scored = task["scorer"](task)
+            if isinstance(scored, tuple):
+                resolved, detail = bool(scored[0]), str(scored[1])
+            else:
+                resolved = bool(scored)
         except Exception as exc:  # noqa: BLE001
             resolved, err = False, err or f"scorer: {exc}"
     else:
         resolved, _ = ws.run_tests()
-    diff = ws.diff()
     out = PolicyResult(
         variant=variant, resolved=resolved, diff=diff, summary=summary,
         ledger=ledger.summary(), budget_hit=budget_hit, error=err,
+        resolve_detail=detail,
     )
     ws.cleanup()
     return out

@@ -72,8 +72,21 @@ WRITE_TOOLS = [
     },
     {
         "name": "run_tests",
-        "description": "Run the repository test suite. Returns pass/fail and output.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": (
+            "Run the repository test suite. Returns pass/fail and output. "
+            "On large repos, pass `target` (a test file/dir path, or a pytest "
+            "expression like `-k name`) to scope the run — whole-suite runs may "
+            "time out."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Optional test path or pytest -k expression to scope the run.",
+                },
+            },
+        },
     },
 ]
 
@@ -124,7 +137,7 @@ class WorkspaceTools:
             if name == "create_file":
                 return self.ws.create_file(inp["path"], inp["content"]), False
             if name == "run_tests":
-                ok, out = self.ws.run_tests()
+                ok, out = self.ws.run_tests(inp.get("target"))
                 header = "TESTS PASSED\n" if ok else "TESTS FAILED\n"
                 return header + out, False
             return f"ERROR: unknown tool {name}", True
