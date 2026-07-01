@@ -98,8 +98,11 @@ python -m eval.run_eval --source native --variants frontier_only scout --budget 
 # 2) Full native run, all three variants
 python -m eval.run_eval --source native --budget 5
 
-# 3) Scale up to a SWE-bench Verified slice (needs network + git)
-python -m eval.run_eval --source swebench --limit 15 --budget 25
+# 3) Large-context test on real repos — clone locally and run one script
+#    (Cloud/Web sandbox can't: HuggingFace + arbitrary GitHub are network-blocked)
+export ANTHROPIC_API_KEY=sk-ant-...
+./run_swebench.sh            # 6 SWE-bench Verified instances, $15 cap
+./run_swebench.sh 8 20       # 8 instances, $20 cap
 
 # Report
 python -m eval.report          # -> results/pareto.png + table

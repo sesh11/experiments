@@ -85,5 +85,7 @@ def load(source: str, limit: int | None = None) -> list[dict]:
     if source == "native":
         return load_native(limit)
     if source == "swebench":
-        return load_swebench_verified(limit or 10)
+        # Real per-instance venv build + gold-patch scoring (runs locally).
+        from . import swebench_env
+        return swebench_env.load(limit or 6)
     raise ValueError(f"unknown task source: {source}")

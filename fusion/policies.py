@@ -35,11 +35,21 @@ def _task_prompt(task: dict) -> str:
     )
 
 
+def _make_ws(task: dict) -> Workspace:
+    """Native tasks are copied to a temp dir; swebench tasks are edited in place
+    (the venv's editable install points at the clone), reset via git first."""
+    if task.get("in_place"):
+        if task.get("reset"):
+            task["reset"](task)
+        return Workspace(task["template_dir"], task["test_cmd"])
+    return Workspace.from_template(task["template_dir"], task["test_cmd"])
+
+
 def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
                       model: str, thinking: dict | None) -> PolicyResult:
     """frontier_only / sidekick_only: one agent, full read+write toolset."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
-    ws = Workspace.from_template(task["template_dir"], task["test_cmd"])
+    ws = _make_ws(task)
     client = LLMClient(ledger, max_tokens=cfg.max_tokens)
     tools = WorkspaceTools(ws)
     agent = Agent(
@@ -54,7 +64,7 @@ def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
 def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
     """scout (A): Sonnet main whose reads are delegated to a Haiku Scout."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
-    ws = Workspace.from_template(task["template_dir"], task["test_cmd"])
+    ws = _make_ws(task)
     client = LLMClient(ledger, max_tokens=cfg.max_tokens)
     tools = WorkspaceTools(ws)
 
@@ -95,7 +105,15 @@ def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
     except Exception as exc:  # keep the run alive; record the failure
         err = f"{type(exc).__name__}: {exc}"
         summary = ""
-    resolved, _ = ws.run_tests()
+    # swebench tasks score the SWE-bench way (gold test patch + FAIL/PASS_TO_PASS);
+    # native tasks just run their own test command.
+    if task.get("scorer"):
+        try:
+            resolved = bool(task["scorer"](task))
+        except Exception as exc:  # noqa: BLE001
+            resolved, err = False, err or f"scorer: {exc}"
+    else:
+        resolved, _ = ws.run_tests()
     diff = ws.diff()
     out = PolicyResult(
         variant=variant, resolved=resolved, diff=diff, summary=summary,
