@@ -30,6 +30,8 @@ def main() -> None:
     ap.add_argument("--budget", type=float, default=25.0, help="global $ cap")
     ap.add_argument("--per-task", type=float, default=3.0, help="$ cap per variant/task")
     ap.add_argument("--no-judge", action="store_true", help="skip the quality judge")
+    ap.add_argument("--max-steps", type=int, default=None,
+                    help="agent tool-loop steps per task (default 14; use ~20 on real repos)")
     args = ap.parse_args()
 
     task_list = tasks.load(args.source, args.limit)
@@ -54,6 +56,8 @@ def main() -> None:
                 budget_usd=max(0.02, min(remaining, args.per_task)),
                 per_task_usd=args.per_task,
             )
+            if args.max_steps:
+                cfg.max_steps = args.max_steps
             print(f"\n▶ {task['instance_id']} :: {variant} "
                   f"(remaining ${remaining:.2f})")
             res = policies.run_variant(variant, task, cfg)
@@ -71,6 +75,7 @@ def main() -> None:
                 "task": task["instance_id"],
                 "variant": variant,
                 "resolved": res.resolved,
+                "resolve_detail": res.resolve_detail,
                 "quality": quality,
                 "would_merge": merge,
                 "run_cost_usd": round(run_cost, 4),
@@ -79,7 +84,7 @@ def main() -> None:
                 **res.ledger,
             }
             rows.append(row)
-            print(f"  resolved={res.resolved} quality={quality} "
+            print(f"  resolved={res.resolved} ({res.resolve_detail}) quality={quality} "
                   f"cost=${run_cost:.4f} "
                   f"main=${res.ledger.get('main_cost_usd', 0)} "
                   f"sidekick=${res.ledger.get('sidekick_cost_usd', 0)}")

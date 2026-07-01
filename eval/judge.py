@@ -38,6 +38,8 @@ _SCHEMA = {
 def judge_merge(task: dict, diff: str, tests_pass: bool) -> dict:
     """Returns {score, would_merge, rationale, cost_usd}."""
     client = anthropic.Anthropic()
+    if len(diff) > 40000:  # cap judge input on huge real-repo diffs
+        diff = diff[:40000] + "\n... (diff truncated for review) ..."
     user = (
         f"Bug report:\n{task['problem_statement']}\n\n"
         f"Automated tests currently pass: {tests_pass}\n\n"

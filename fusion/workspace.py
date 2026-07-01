@@ -16,21 +16,28 @@ from pathlib import Path
 
 
 class Workspace:
-    def __init__(self, root: str | Path, test_cmd: str):
+    def __init__(self, root: str | Path, test_cmd: str, *,
+                 use_git: bool = False, test_timeout: int = 120):
         self.root = Path(root).resolve()
         self.test_cmd = test_cmd
+        self.use_git = use_git and (self.root / ".git").exists()
+        self.test_timeout = test_timeout
         self._original: dict[str, str] = {}
-        for p in self._py_files():
-            self._original[str(p.relative_to(self.root))] = p.read_text()
+        if not self.use_git:
+            # Snapshot for difflib. Skipped in git mode: reading every .py in a
+            # sympy-sized repo is slow, and `git diff` is authoritative there.
+            for p in self._py_files():
+                self._original[str(p.relative_to(self.root))] = p.read_text()
 
     # --- lifecycle ---------------------------------------------------------
     @classmethod
-    def from_template(cls, template_dir: str | Path, test_cmd: str) -> "Workspace":
+    def from_template(cls, template_dir: str | Path, test_cmd: str,
+                      **kwargs) -> "Workspace":
         """Copy a task template into a fresh temp dir so runs never collide."""
         tmp = tempfile.mkdtemp(prefix="fusion_ws_")
         dst = Path(tmp) / "repo"
         shutil.copytree(template_dir, dst)
-        return cls(dst, test_cmd)
+        return cls(dst, test_cmd, **kwargs)
 
     def cleanup(self) -> None:
         parent = self.root.parent
@@ -75,6 +82,22 @@ class Workspace:
             rx = re.compile(pattern)
         except re.error as exc:
             return f"ERROR: bad regex: {exc}"
+        if self.use_git:
+            # git grep searches tracked files only (excludes .venv etc.) and is
+            # far faster than a Python walk over a large repo.
+            proc = subprocess.run(
+                ["git", "grep", "-nIE", pattern, "--", "*.py"],
+                cwd=self.root, capture_output=True, text=True, timeout=60,
+            )
+            if proc.returncode > 1:
+                return f"ERROR: git grep: {proc.stderr.strip()[:200]}"
+            lines = proc.stdout.splitlines()
+            if not lines:
+                return "(no matches)"
+            out = lines[:max_hits]
+            if len(lines) > max_hits:
+                out.append(f"... ({len(lines) - max_hits} more hits truncated)")
+            return "\n".join(out)
         hits = []
         for p in self._py_files():
             rel = p.relative_to(self.root)
@@ -106,11 +129,17 @@ class Workspace:
         return f"OK: wrote {path}"
 
     # --- verification ------------------------------------------------------
-    def run_tests(self, timeout: int = 120) -> tuple[bool, str]:
+    def run_tests(self, target: str | None = None) -> tuple[bool, str]:
+        cmd = self.test_cmd
+        if target:
+            # target is model-supplied; keep it to a plain path / -k expression.
+            if any(c in target for c in ";|&`$><\n"):
+                return False, "ERROR: invalid characters in target"
+            cmd = f"{cmd} {target}"
         try:
             proc = subprocess.run(
-                self.test_cmd, shell=True, cwd=self.root,
-                capture_output=True, text=True, timeout=timeout,
+                cmd, shell=True, cwd=self.root,
+                capture_output=True, text=True, timeout=self.test_timeout,
             )
         except subprocess.TimeoutExpired:
             return False, "ERROR: test command timed out"
@@ -121,6 +150,8 @@ class Workspace:
 
     # --- diff --------------------------------------------------------------
     def diff(self) -> str:
+        if self.use_git:
+            return self._git_diff()
         chunks = []
         current = {str(p.relative_to(self.root)): p.read_text() for p in self._py_files()}
         keys = sorted(set(self._original) | set(current))
@@ -135,3 +166,23 @@ class Workspace:
             )
             chunks.append("".join(d))
         return "\n".join(chunks) or "(no changes)"
+
+    def _git_diff(self) -> str:
+        proc = subprocess.run(["git", "diff"], cwd=self.root,
+                              capture_output=True, text=True, timeout=120)
+        parts = [proc.stdout] if proc.stdout.strip() else []
+        # New files created by the agent are untracked; synthesize their diffs.
+        ls = subprocess.run(["git", "ls-files", "--others", "--exclude-standard",
+                             "--", "*.py"],
+                            cwd=self.root, capture_output=True, text=True, timeout=60)
+        for rel in ls.stdout.splitlines():
+            if rel.startswith(".venv/") or not rel.strip():
+                continue
+            try:
+                after = (self.root / rel).read_text()
+            except Exception:
+                continue
+            d = difflib.unified_diff([], after.splitlines(keepends=True),
+                                     fromfile="/dev/null", tofile=f"b/{rel}")
+            parts.append("".join(d))
+        return "\n".join(p for p in parts if p) or "(no changes)"

@@ -26,6 +26,7 @@ class PolicyResult:
     ledger: dict
     budget_hit: bool = False
     error: str = ""
+    resolve_detail: str = ""
 
 
 def _task_prompt(task: dict) -> str:
@@ -35,11 +36,23 @@ def _task_prompt(task: dict) -> str:
     )
 
 
+def _make_ws(task: dict) -> Workspace:
+    """Native tasks are copied to a temp dir; swebench tasks are edited in place
+    (the venv's editable install points at the clone), reset via git first."""
+    if task.get("in_place"):
+        if task.get("reset"):
+            task["reset"](task)
+        return Workspace(task["template_dir"], task["test_cmd"],
+                         use_git=True, test_timeout=task.get("test_timeout", 600))
+    return Workspace.from_template(task["template_dir"], task["test_cmd"],
+                                   test_timeout=task.get("test_timeout", 120))
+
+
 def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
                       model: str, thinking: dict | None) -> PolicyResult:
     """frontier_only / sidekick_only: one agent, full read+write toolset."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
-    ws = Workspace.from_template(task["template_dir"], task["test_cmd"])
+    ws = _make_ws(task)
     client = LLMClient(ledger, max_tokens=cfg.max_tokens)
     tools = WorkspaceTools(ws)
     agent = Agent(
@@ -54,7 +67,7 @@ def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
 def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
     """scout (A): Sonnet main whose reads are delegated to a Haiku Scout."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
-    ws = Workspace.from_template(task["template_dir"], task["test_cmd"])
+    ws = _make_ws(task)
     client = LLMClient(ledger, max_tokens=cfg.max_tokens)
     tools = WorkspaceTools(ws)
 
@@ -95,11 +108,27 @@ def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
     except Exception as exc:  # keep the run alive; record the failure
         err = f"{type(exc).__name__}: {exc}"
         summary = ""
-    resolved, _ = ws.run_tests()
+    # Capture the agent's diff BEFORE scoring: the scorer applies/reverts the
+    # gold test patch and must not pollute the recorded change.
     diff = ws.diff()
+    # swebench tasks score the SWE-bench way (gold test patch + FAIL/PASS_TO_PASS);
+    # native tasks just run their own test command.
+    detail = ""
+    if task.get("scorer"):
+        try:
+            scored = task["scorer"](task)
+            if isinstance(scored, tuple):
+                resolved, detail = bool(scored[0]), str(scored[1])
+            else:
+                resolved = bool(scored)
+        except Exception as exc:  # noqa: BLE001
+            resolved, err = False, err or f"scorer: {exc}"
+    else:
+        resolved, _ = ws.run_tests()
     out = PolicyResult(
         variant=variant, resolved=resolved, diff=diff, summary=summary,
         ledger=ledger.summary(), budget_hit=budget_hit, error=err,
+        resolve_detail=detail,
     )
     ws.cleanup()
     return out

@@ -98,8 +98,12 @@ python -m eval.run_eval --source native --variants frontier_only scout --budget 
 # 2) Full native run, all three variants
 python -m eval.run_eval --source native --budget 5
 
-# 3) Scale up to a SWE-bench Verified slice (needs network + git)
-python -m eval.run_eval --source swebench --limit 15 --budget 25
+# 3) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
+#    tasks, with real FAIL_TO_PASS scoring. Clone locally and run one script
+#    (Cloud/Web sandbox can't: HuggingFace + arbitrary GitHub are network-blocked).
+export ANTHROPIC_API_KEY=sk-ant-...
+./run_swebench.sh            # 15 instances, $25 cap
+./run_swebench.sh 10 15      # 10 instances, $15 cap
 
 # Report
 python -m eval.report          # -> results/pareto.png + table
