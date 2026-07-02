@@ -87,7 +87,8 @@ def main() -> None:
             print(f"  resolved={res.resolved} ({res.resolve_detail}) quality={quality} "
                   f"cost=${run_cost:.4f} "
                   f"main=${res.ledger.get('main_cost_usd', 0)} "
-                  f"sidekick=${res.ledger.get('sidekick_cost_usd', 0)}")
+                  f"sidekick=${res.ledger.get('sidekick_cost_usd', 0)}"
+                  + (" budget_hit=True" if res.budget_hit else ""))
 
     _OUT.mkdir(exist_ok=True)
     (_OUT / "summary.json").write_text(json.dumps(rows, indent=2))

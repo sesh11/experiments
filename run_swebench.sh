@@ -54,8 +54,11 @@ pip install --quiet -r requirements.txt pytest
 
 echo "==> Falsifying run: ${LIMIT} instances, \$${BUDGET} cap, variants: frontier_only scout"
 echo "    (env build + validation gate happens first; skipped instances are printed with reasons)"
+# per-task 2.5 / 30 steps: at 1.5/20 many runs hit the cap mid-fix and scored
+# as agent failures. At worst-case spend $25 covers ~5 instances x 2 variants;
+# raise the budget arg (e.g. `./run_swebench.sh 15 40`) for a fuller run.
 python -m eval.run_eval --source swebench --limit "$LIMIT" --budget "$BUDGET" \
-  --per-task 1.5 --max-steps 20 --variants frontier_only scout
+  --per-task 2.5 --max-steps 30 --variants frontier_only scout
 
 echo "==> Report"
 python -m eval.report
