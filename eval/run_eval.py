@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from fusion import config, policies
-from . import judge, tasks
+from . import audit, judge, tasks
 
 _OUT = Path("results")
 
@@ -35,8 +35,10 @@ def main() -> None:
     args = ap.parse_args()
 
     task_list = tasks.load(args.source, args.limit)
+    log = audit.Audit(_OUT)
     print(f"Loaded {len(task_list)} task(s) from '{args.source}'. "
           f"Variants: {args.variants}. Budget: ${args.budget:.2f}")
+    print(f"Per-run audit logs: {log.dir}/")
 
     rows: list[dict] = []
     spent = 0.0
@@ -58,8 +60,6 @@ def main() -> None:
             )
             if args.max_steps:
                 cfg.max_steps = args.max_steps
-            print(f"\n▶ {task['instance_id']} :: {variant} "
-                  f"(remaining ${remaining:.2f})")
             res = policies.run_variant(variant, task, cfg)
             run_cost = res.ledger.get("total_cost_usd", 0.0)
             spent += run_cost
@@ -71,11 +71,19 @@ def main() -> None:
                 quality, merge = j["score"], j["would_merge"]
                 spent += j.get("cost_usd", 0.0)
 
+            print("\n" + log.record(task=task, variant=variant, res=res,
+                                    quality=quality, would_merge=merge,
+                                    remaining_before=remaining))
+
             row = {
                 "task": task["instance_id"],
                 "variant": variant,
                 "resolved": res.resolved,
                 "resolve_detail": res.resolve_detail,
+                "steps": res.steps,
+                "finished": res.finished,
+                "test_files_touched": bool(audit._touched_tests(
+                    audit._diff_files(res.diff or ""))),
                 "quality": quality,
                 "would_merge": merge,
                 "run_cost_usd": round(run_cost, 4),
@@ -84,17 +92,38 @@ def main() -> None:
                 **res.ledger,
             }
             rows.append(row)
-            print(f"  resolved={res.resolved} ({res.resolve_detail}) quality={quality} "
-                  f"cost=${run_cost:.4f} "
-                  f"main=${res.ledger.get('main_cost_usd', 0)} "
-                  f"sidekick=${res.ledger.get('sidekick_cost_usd', 0)}"
-                  + (" budget_hit=True" if res.budget_hit else ""))
 
     _OUT.mkdir(exist_ok=True)
     (_OUT / "summary.json").write_text(json.dumps(rows, indent=2))
     _write_csv(rows, _OUT / "summary.csv")
-    print(f"\n=== Done. {len(rows)} runs, total spend ${spent:.2f}. "
-          f"Wrote {_OUT}/summary.json and summary.csv ===")
+    _print_tally(rows)
+    print(f"\n=== Done. {len(rows)} runs, total spend ${spent:.2f}. ===")
+    print(f"    Summary:   {_OUT}/summary.json + summary.csv")
+    print(f"    Full logs: {log.dir}/ (one .log per run + runs.jsonl)")
+
+
+def _print_tally(rows: list[dict]) -> None:
+    """Per-variant resolve/cost roll-up so the headline is visible without a report."""
+    if not rows:
+        return
+    print("\n=== tally by variant ===")
+    variants: dict[str, list[dict]] = {}
+    for r in rows:
+        variants.setdefault(r["variant"], []).append(r)
+    for v, rs in variants.items():
+        resolved = sum(1 for r in rs if r["resolved"])
+        budget_hits = sum(1 for r in rs if r["budget_hit"])
+        test_edits = sum(1 for r in rs if r.get("test_files_touched"))
+        main = sum(r.get("main_cost_usd", 0) or 0 for r in rs)
+        side = sum(r.get("sidekick_cost_usd", 0) or 0 for r in rs)
+        note = []
+        if budget_hits:
+            note.append(f"{budget_hits} budget-capped")
+        if test_edits:
+            note.append(f"{test_edits} edited tests")
+        suffix = f"  ({', '.join(note)})" if note else ""
+        print(f"  {v:<14} resolved {resolved}/{len(rs)}  "
+              f"main ${main:.2f} / sidekick ${side:.2f}{suffix}")
 
 
 def _write_csv(rows: list[dict], path: Path) -> None:

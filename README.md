@@ -98,7 +98,17 @@ python -m eval.run_eval --source native --variants frontier_only scout --budget 
 # 2) Full native run, all three variants
 python -m eval.run_eval --source native --budget 5
 
-# 3) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
+# 3) CONFIRM SCORING FIRST (cheap) — before spending on a big run, prove the
+#    scoring pipeline is correct and see whether you even need a better harness.
+#    Phase 1 is FREE (applies each gold solution patch, checks the scorer marks
+#    it resolved — $0 LLM). Phase 2 is a small, hard-capped real agent run.
+./confirm_scoring.sh          # 5 instances, $6 cap on the agent phase
+./confirm_scoring.sh 5 0      # phase 1 only (free): just verify scoring
+
+#    Or run the free scoring self-test directly:
+python -m eval.selftest_scoring --limit 5
+
+# 4) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
 #    tasks, with real FAIL_TO_PASS scoring. Clone locally and run one script
 #    (Cloud/Web sandbox can't: HuggingFace + arbitrary GitHub are network-blocked).
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -108,6 +118,18 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Report
 python -m eval.report          # -> results/pareto.png + table
 ```
+
+### Reading a run: the audit log
+
+Every `(task, variant)` run prints a compact block and writes a full-detail log
+to `results/runs/<stamp>/<task>__<variant>.log` (plus a machine-readable
+`runs.jsonl`). The terminal block's **`why:`** line attributes each outcome so a
+failure is never a guess — it distinguishes *agent* problems (no diff, edited a
+test file, wrong/incomplete fix, broke PASS_TO_PASS) from *scoring/env* problems
+(gold patch won't apply, pytest crashed collecting) from *budget* cutoffs. The
+per-run `.log` has the complete tool-call trace (main **and** scout), the diff
+with test-file flagging, and the **actual pytest output** from scoring. Start
+with `why:`, open the `.log` when you need the evidence.
 
 Budget is enforced two ways: a **global** `--budget` cap across the whole run and a
 **per-task** cap (`--per-task`, default $3). When the budget is exhausted the run stops

@@ -105,6 +105,19 @@ def _pytest(venv_py: str, d: Path, ids: list[str], timeout=TEST_TIMEOUT):
                  "-p", "no:cacheprovider", *ids], cwd=d, timeout=timeout)
 
 
+def _pytest_digest(proc, max_chars: int = 1200) -> str:
+    """The informative part of a pytest run: any FAILED/ERROR lines plus the
+    tail (which holds the summary line). Kept small enough to log per run."""
+    out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+    flagged = [ln for ln in out.splitlines()
+               if ("FAILED" in ln or "ERROR" in ln or ln.startswith("E   ")
+                   or " passed" in ln or " failed" in ln or " error" in ln)]
+    head = "\n".join(flagged[:20])
+    tail = out.strip()[-max_chars:]
+    combined = (head + "\n...\n" + tail) if head and head not in tail else tail
+    return combined[-max_chars:].strip() or "(no pytest output)"
+
+
 # --- env build ---------------------------------------------------------------
 def _build_env(row: dict) -> tuple[Path, str] | None:
     iid = row["instance_id"]
@@ -198,21 +211,56 @@ def _scorer(task: dict) -> tuple[bool, str]:
     ok, revert = _apply_gold(d, task["_test_patch"], task["_base_commit"])
     if not ok:
         revert()
+        task["_score_artifacts"] = {"apply_ok": False}
         return False, "gold test patch failed to apply even after resetting test files"
     try:
-        f2p_rc = _pytest(venv, d, task["_f2p"]).returncode
+        f2p_proc = _pytest(venv, d, task["_f2p"])
         p2p = task["_p2p"]
-        if p2p:
-            p2p_rc = _pytest(venv, d, p2p).returncode
-        else:
-            p2p_rc = 0
+        p2p_proc = _pytest(venv, d, p2p) if p2p else None
     except subprocess.TimeoutExpired:
         revert()
+        task["_score_artifacts"] = {"apply_ok": True, "timed_out": True}
         return False, "scoring run timed out"
     revert()
+    f2p_rc = f2p_proc.returncode
+    p2p_rc = p2p_proc.returncode if p2p_proc else 0
+    # Stash the full scoring evidence so the audit log can show WHY a run
+    # failed — a wrong fix, a crashed pytest, or an untouched file all differ.
+    task["_score_artifacts"] = {
+        "apply_ok": True,
+        "f2p_rc": f2p_rc, "f2p_ids": task["_f2p"],
+        "f2p_output": _pytest_digest(f2p_proc),
+        "p2p_rc": p2p_rc, "p2p_n": len(p2p),
+        "p2p_output": _pytest_digest(p2p_proc) if p2p_proc else "(no P2P ids)",
+    }
     detail = (f"f2p({len(task['_f2p'])}) {_rc_label(f2p_rc)}; "
               f"p2p({len(p2p)} sampled) {_rc_label(p2p_rc)}")
     return f2p_rc == 0 and p2p_rc == 0, detail
+
+
+def score_with_gold_patch(task: dict) -> tuple[bool, str]:
+    """$0 pipeline self-test: reset the repo, apply the dataset's GOLD SOLUTION
+    patch (the known-correct human fix), then run the exact scorer used for
+    agent runs. A correct scorer MUST return resolved=True here. If it doesn't,
+    the scoring pipeline — not the agent — is what's failing real runs."""
+    _reset(task)
+    d = Path(task["_dir"])
+    patch = task.get("_gold_patch") or ""
+    if not patch.strip():
+        return False, "no gold solution patch in dataset row"
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False) as fh:
+        fh.write(patch)
+        pfile = fh.name
+    applied = _run(["git", "apply", pfile], cwd=d).returncode == 0
+    if not applied:
+        applied = _run(["git", "apply", "--3way", pfile], cwd=d).returncode == 0
+    Path(pfile).unlink(missing_ok=True)
+    if not applied:
+        _reset(task)
+        return False, "gold SOLUTION patch failed to apply (repo/base mismatch)"
+    resolved, detail = _scorer(task)
+    _reset(task)
+    return resolved, detail
 
 
 def _reset(task: dict) -> None:
@@ -230,7 +278,7 @@ def _task(row: dict, d: Path, venv_py: str, p2p: list[str]) -> dict:
         "test_timeout": TEST_TIMEOUT,
         "problem_statement": row["problem_statement"],
         "_dir": str(d), "_venv": venv_py, "_base_commit": row["base_commit"],
-        "_test_patch": row["test_patch"],
+        "_test_patch": row["test_patch"], "_gold_patch": row.get("patch", ""),
         "_f2p": _ids(row["FAIL_TO_PASS"]), "_p2p": p2p,
         "reset": _reset, "scorer": _scorer,
     }

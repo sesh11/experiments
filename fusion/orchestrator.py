@@ -27,8 +27,9 @@ every token you return to them."""
 
 def make_scout_map(question: str, ws: Workspace, client: LLMClient,
                    max_steps: int, sidekick_model: str,
-                   thinking: dict | None) -> str:
-    """Spin a fresh read-only Scout agent (own context) and return its cited map."""
+                   thinking: dict | None) -> tuple[str, list]:
+    """Spin a fresh read-only Scout agent (own context). Returns (cited map,
+    the scout's own tool-call trace) so the run is fully auditable."""
     from .tools import READ_TOOLS
     tools = WorkspaceTools(ws)
     scout = Agent(
@@ -41,4 +42,4 @@ def make_scout_map(question: str, ws: Workspace, client: LLMClient,
         f"Explore the repo with your read-only tools, then reply with the cited map."
     )
     result = scout.run(prompt, tools.execute)
-    return result.text or "(scout returned no map)"
+    return (result.text or "(scout returned no map)"), result.trace
