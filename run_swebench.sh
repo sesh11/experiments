@@ -12,9 +12,11 @@
 # don't validate are skipped BEFORE any LLM spend, so `resolved` means something.
 #
 # Usage (from a machine with open network — not the Claude Code web sandbox):
-#   export ANTHROPIC_API_KEY=sk-ant-...
+#   cp .env.example .env   # then put your key in .env
 #   ./run_swebench.sh                 # 15 instances, $25 budget cap
 #   ./run_swebench.sh 10 15           # 10 instances, $15 cap
+#
+# The key can come from a .env file (preferred) or the environment.
 #
 # Notes:
 #   * python3.11 or 3.10 recommended on PATH (old 2019-23 repos break on 3.12+).
@@ -22,15 +24,26 @@
 #     ~/.cache/fusion_swebench for reruns).
 set -euo pipefail
 
-LIMIT="${1:-15}"
-BUDGET="${2:-25}"
+cd "$(dirname "$0")"
 
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: set ANTHROPIC_API_KEY first  (export ANTHROPIC_API_KEY=sk-ant-...)" >&2
-  exit 1
+# Load .env if present (KEY=VALUE lines; '#' comments and blanks ignored).
+if [ -f .env ]; then
+  echo "==> Loading .env"
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
 fi
 
-cd "$(dirname "$0")"
+# Positional args win; otherwise fall back to .env values, otherwise defaults.
+LIMIT="${1:-${LIMIT:-15}}"
+BUDGET="${2:-${BUDGET:-25}}"
+
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "ERROR: no ANTHROPIC_API_KEY. Copy .env.example to .env and add your key," >&2
+  echo "       or run: export ANTHROPIC_API_KEY=sk-ant-..." >&2
+  exit 1
+fi
 
 echo "==> Setting up harness virtualenv (.venv)"
 python3 -m venv .venv
