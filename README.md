@@ -119,6 +119,36 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python -m eval.report          # -> results/pareto.png + table
 ```
 
+### Running the Docker scoring on AWS EC2 (required for trustworthy scores)
+
+SWE-bench only scores reliably on **x86_64 Linux**. On Apple Silicon it emulates
+x86 and even gold patches fail — so score on an Intel/AMD EC2 box.
+
+**Launch an instance:**
+- **AMI:** Ubuntu 22.04 or 24.04 (x86_64).
+- **Instance type:** an **Intel/AMD** type — `c6i.2xlarge` or `m6i.2xlarge` (8 vCPU,
+  16–32 GB). **Not** a `g`/Graviton (`*g.*`) type — those are ARM and have the exact
+  same problem as the Mac.
+- **Storage:** root EBS **100–160 GB** (Docker images are large; the 8 GB default
+  fills up fast).
+- **Security group / network:** default outbound is fine — it needs to reach
+  Docker Hub, HuggingFace, and the Anthropic API.
+
+**Set it up and run:**
+```bash
+# on the instance, after cloning this repo and checking out your branch:
+sudo bash scripts/ec2_bootstrap.sh     # installs docker+python, one time
+exit                                    # re-login so docker group applies
+ssh ...                                 # reconnect
+docker run --rm hello-world             # sanity check (no sudo needed)
+
+cp .env.example .env && nano .env       # paste ANTHROPIC_API_KEY
+./confirm_scoring.sh 5 0                 # FREE gold check — expect 5/5
+./confirm_scoring.sh 5 6                 # then the real ~$6 comparison
+```
+The bootstrap refuses to run on ARM and warns on low disk, so you can't
+accidentally recreate the Mac problem.
+
 ### Reading a run: the audit log
 
 Every `(task, variant)` run prints a compact block and writes a full-detail log
