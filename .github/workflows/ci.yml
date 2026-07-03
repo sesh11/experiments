@@ -1,0 +1,28 @@
+name: ci
+
+# Free, fast, no-secret checks on every push and PR. No LLM calls, no Docker,
+# no API key — just proves the harness imports, byte-compiles, and its sandbox
+# test loop works. Catches breakage before you spend anything on a real run.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lightweight deps
+        run: pip install --quiet pytest
+
+      - name: Byte-compile all modules (syntax check, no imports)
+        run: python -m compileall -q fusion eval scripts
+
+      - name: No-LLM workspace smoke test
+        run: python scripts/smoke_workspace.py

@@ -1,0 +1,78 @@
+name: eval
+
+# Manual "run the scoring" button. Runs on YOUR EC2 box (registered as a
+# self-hosted x86_64 runner) because SWE-bench only scores reliably on x86_64
+# Linux + Docker. Results are uploaded as a downloadable artifact.
+#
+# Setup (one time) — see docs/DEPLOY.md:
+#   1) Add repo secret ANTHROPIC_API_KEY.
+#   2) Register the EC2 instance as a self-hosted runner (labels: self-hosted, x64).
+#   3) This workflow must be on the DEFAULT branch for the "Run workflow" button
+#      to appear in the Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Number of SWE-bench instances"
+        default: "5"
+        required: true
+      budget:
+        description: "Agent $ cap. 0 = FREE gold self-test only (no LLM spend)."
+        default: "0"
+        required: true
+
+concurrency:
+  # Never run two scoring jobs on the same box at once (shared Docker/disk).
+  group: eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse to run on ARM (would recreate the Mac problem)
+        run: |
+          arch="$(uname -m)"
+          echo "runner arch: $arch"
+          if [ "$arch" != "x86_64" ]; then
+            echo "::error::Runner is $arch, not x86_64. Register an Intel/AMD EC2 runner."
+            exit 1
+          fi
+
+      - name: Run scoring (phase 1 gold check; phase 2 if budget > 0)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          chmod +x confirm_scoring.sh
+          ./confirm_scoring.sh "${{ inputs.limit }}" "${{ inputs.budget }}"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Eval run: limit=${{ inputs.limit }}, budget=\$${{ inputs.budget }}"
+            if [ -f results/summary.csv ]; then
+              echo "### Per-run summary"
+              echo '```'
+              cat results/summary.csv
+              echo '```'
+            else
+              echo "_Phase-1-only run (budget=0): see job log above for the gold X/N result._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results + logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: |
+            results/
+            logs/
+            *.json
+          if-no-files-found: ignore
+          retention-days: 30
