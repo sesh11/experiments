@@ -22,6 +22,7 @@ Everything here is Docker-side; nothing depends on the flaky local venv.
 from __future__ import annotations
 
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -51,7 +52,13 @@ def preflight() -> tuple[bool, str]:
         import swebench  # noqa: F401
     except Exception:  # noqa: BLE001
         return False, "the `swebench` package is not installed (pip install swebench)"
-    return True, "docker + swebench ready"
+    note = "docker + swebench ready"
+    if platform.machine().lower() in ("arm64", "aarch64"):
+        note += ("\n    NOTE: Apple Silicon / arm64 detected. If prebuilt arm64 images "
+                 "aren't\n    published for an instance, the harness BUILDS it locally the "
+                 "first time —\n    expect several minutes per instance on the first run "
+                 "(then cached).")
+    return True, note
 
 
 def _slug(model_name: str) -> str:
@@ -66,7 +73,7 @@ def _report_path(run_id: str, model_name: str, instance_id: str) -> Path:
 def _run_harness(*, predictions_path: str, instance_ids: list[str], run_id: str,
                  dataset_name: str, split: str, namespace: str | None,
                  workers: int, timeout: int, force_rebuild: bool,
-                 cwd: Path) -> subprocess.CompletedProcess:
+                 cwd: Path, stream: bool = True) -> subprocess.CompletedProcess:
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
         "--dataset_name", dataset_name,
@@ -83,6 +90,14 @@ def _run_harness(*, predictions_path: str, instance_ids: list[str], run_id: str,
     # Docker Hub; "none" forces local builds. Pass through explicitly.
     if namespace:
         cmd += ["--namespace", namespace]
+    # stream=True inherits stdout/stderr so the harness's own progress (image
+    # pull/build, per-instance status, tqdm bar) is visible LIVE — a Docker run
+    # takes minutes per instance and must never look frozen. We read results
+    # from report.json either way, so we don't need to capture the output.
+    if stream:
+        print(f"    $ {' '.join(cmd[:3])} … (live harness output follows)", flush=True)
+        proc = subprocess.run(cmd, cwd=str(cwd), text=True)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout="", stderr="")
     return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
 
 
@@ -109,7 +124,7 @@ def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
                 split: str = "test", run_id: str, model_name: str,
                 namespace: str | None = "swebench", workers: int = 1,
                 timeout: int = 1800, force_rebuild: bool = False,
-                cwd: Path | None = None) -> dict:
+                cwd: Path | None = None, stream: bool = True) -> dict:
     """Score a single agent patch in the official pinned Docker env.
 
     Returns a dict: resolved(bool), detail(str), applied(bool), report(dict),
@@ -132,11 +147,13 @@ def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
         proc = _run_harness(predictions_path=preds, instance_ids=[instance_id],
                             run_id=run_id, dataset_name=dataset_name, split=split,
                             namespace=namespace, workers=workers, timeout=timeout,
-                            force_rebuild=force_rebuild, cwd=cwd)
+                            force_rebuild=force_rebuild, cwd=cwd, stream=stream)
     finally:
         Path(preds).unlink(missing_ok=True)
 
     tail = (proc.stdout or "")[-1500:] + (("\n" + proc.stderr[-800:]) if proc.stderr else "")
+    if stream and not tail:
+        tail = "(harness output was streamed live above)"
     rep_file = cwd / _report_path(run_id, model_name, instance_id)
     if not rep_file.exists():
         return {"resolved": False,
@@ -155,7 +172,8 @@ def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
 
 def gold_selftest(instance_ids: list[str], *, dataset_name: str, split: str = "test",
                   run_id: str, namespace: str | None = "swebench", workers: int = 2,
-                  timeout: int = 1800, cwd: Path | None = None) -> dict:
+                  timeout: int = 1800, cwd: Path | None = None,
+                  stream: bool = True) -> dict:
     """Score the GOLD patches (`-p gold`). Every instance MUST resolve; this is
     the authoritative proof that the Docker scoring pipeline is correct.
 
@@ -165,8 +183,10 @@ def gold_selftest(instance_ids: list[str], *, dataset_name: str, split: str = "t
     proc = _run_harness(predictions_path="gold", instance_ids=instance_ids,
                         run_id=run_id, dataset_name=dataset_name, split=split,
                         namespace=namespace, workers=workers, timeout=timeout,
-                        force_rebuild=False, cwd=cwd)
+                        force_rebuild=False, cwd=cwd, stream=stream)
     tail = (proc.stdout or "")[-2000:] + (("\n" + proc.stderr[-1000:]) if proc.stderr else "")
+    if stream and not tail:
+        tail = "(harness output was streamed live above)"
     resolved, unresolved = [], []
     for iid in instance_ids:
         rep_file = cwd / _report_path(run_id, "gold", iid)

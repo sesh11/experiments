@@ -36,7 +36,9 @@ def _docker(limit: int) -> int:
         return 2
     print(f"== Docker scoring self-test: GOLD patches must resolve on "
           f"{len(ids)} instance(s) ==")
-    print("   (first run pulls per-instance images from Docker Hub — slow, then cached)\n")
+    print("   First run builds/pulls a Docker image PER INSTANCE — minutes each, then")
+    print("   cached. The harness prints live progress below; it is NOT frozen. To watch")
+    print("   from another terminal:  docker ps   and   docker images | grep sweb\n")
     for iid in ids:
         print(f"   - {iid}")
     run_id = f"gold_selftest_{datetime.now():%Y%m%d_%H%M%S}"
