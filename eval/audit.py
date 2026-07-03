@@ -100,7 +100,21 @@ class Audit:
             parts.append(_fmt_trace(res.scout_trace))
         parts.append("")
         parts.append("--- scoring evidence ---")
-        if not art:
+        if art.get("backend") == "docker":
+            rep = art.get("report", {})
+            ts = rep.get("tests_status", {})
+            parts.append("scored by the official SWE-bench Docker harness (pinned env).")
+            parts.append(f"patch applied in pinned env: {art.get('apply_ok')}")
+            if ts:
+                for kind in ("FAIL_TO_PASS", "PASS_TO_PASS"):
+                    s = ts.get(kind, {}).get("success", [])
+                    f = ts.get(kind, {}).get("failure", [])
+                    parts.append(f"{kind}: {len(s)} passed, {len(f)} failed"
+                                 + (f"  (failed: {f[:5]})" if f else ""))
+            parts.append("")
+            parts.append("harness output tail:")
+            parts.append(art.get("harness_tail", "") or "(none)")
+        elif not art:
             parts.append("(native task: scored by its own test command, no SWE-bench artifacts)")
         elif not art.get("apply_ok", True):
             parts.append("gold test patch FAILED TO APPLY even after resetting test files.")
@@ -170,6 +184,18 @@ class Audit:
             return "agent produced NO diff (nothing was changed) — agent-side"
         if test_files:
             return f"agent edited test file(s) {test_files}; those edits are discarded by scoring — agent-side"
+        if art.get("backend") == "docker":
+            if not art.get("apply_ok", True):
+                return "patch did not apply in the pinned Docker env — agent-side (bad/stale diff)"
+            rep = art.get("report", {})
+            ts = rep.get("tests_status", {})
+            p2p_fail = ts.get("PASS_TO_PASS", {}).get("failure", [])
+            f2p_fail = ts.get("FAIL_TO_PASS", {}).get("failure", [])
+            if not f2p_fail and p2p_fail:
+                return "fix passed FAIL_TO_PASS but broke PASS_TO_PASS — real regression, agent-side"
+            if f2p_fail:
+                return "real diff but FAIL_TO_PASS still fails in the pinned env — wrong/incomplete fix"
+            return "unresolved per the official harness — see report + harness tail in the log"
         if art and not art.get("apply_ok", True):
             return "gold test patch failed to apply — scoring/patch-side, inspect the log"
         if art.get("f2p_rc") in (2, 3, 4, 5):

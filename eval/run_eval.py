@@ -14,12 +14,38 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 from fusion import config, policies
 from . import audit, judge, tasks
 
 _OUT = Path("results")
+
+
+def _make_scorer(args):
+    """Return a callable (task, variant, diff) -> score dict for the docker
+    backend, or None for local (which scores inline in policies). Aborts early
+    if Docker/swebench aren't ready, so a run never silently mis-scores."""
+    if args.backend != "docker":
+        return None
+    from . import docker_score, swebench_env
+    ok, reason = docker_score.preflight()
+    if not ok:
+        raise SystemExit(f"!! --backend docker unavailable: {reason}")
+    run_id = f"fusion_{datetime.now():%Y%m%d_%H%M%S}"
+    print(f"Docker scoring backend ready ({reason}); run_id={run_id}")
+
+    def score(task, variant, diff):
+        sc = docker_score.score_patch(
+            task["instance_id"], diff,
+            dataset_name=task.get("_dataset", swebench_env.DATASET_NAME),
+            split=task.get("_split", swebench_env.SPLIT),
+            run_id=run_id, model_name=f"fusion-{variant}",
+        )
+        return sc
+
+    return score
 
 
 def main() -> None:
@@ -32,9 +58,14 @@ def main() -> None:
     ap.add_argument("--no-judge", action="store_true", help="skip the quality judge")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="agent tool-loop steps per task (default 14; use ~20 on real repos)")
+    ap.add_argument("--backend", default="local", choices=["local", "docker"],
+                    help="swebench scoring backend: 'local' pytest (fast, needs a "
+                         "reproducible local env) or 'docker' (authoritative, uses "
+                         "the official SWE-bench harness with pinned images)")
     args = ap.parse_args()
 
-    task_list = tasks.load(args.source, args.limit)
+    scorer = _make_scorer(args) if args.source == "swebench" else None
+    task_list = tasks.load(args.source, args.limit, backend=args.backend)
     log = audit.Audit(_OUT)
     print(f"Loaded {len(task_list)} task(s) from '{args.source}'. "
           f"Variants: {args.variants}. Budget: ${args.budget:.2f}")
@@ -63,6 +94,19 @@ def main() -> None:
             res = policies.run_variant(variant, task, cfg)
             run_cost = res.ledger.get("total_cost_usd", 0.0)
             spent += run_cost
+
+            # Docker backend: score the agent's diff in the official pinned env.
+            if scorer is not None and task.get("backend") == "docker":
+                print(f"    … scoring {task['instance_id']} :: {variant} in Docker "
+                      f"(pinned env; first build/pull is slow) …", flush=True)
+                sc = scorer(task, variant, res.diff)
+                res.resolved = sc["resolved"]
+                res.resolve_detail = sc["detail"]
+                res.score_artifacts = {
+                    "backend": "docker", "apply_ok": sc["applied"],
+                    "report": sc.get("report", {}),
+                    "harness_tail": sc.get("harness_tail", ""),
+                }
 
             quality = None
             merge = None

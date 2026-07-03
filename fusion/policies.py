@@ -123,10 +123,15 @@ def _finalize(variant, task, ws, ledger, agent, execute,
     # Capture the agent's diff BEFORE scoring: the scorer applies/reverts the
     # gold test patch and must not pollute the recorded change.
     diff = ws.diff()
-    # swebench tasks score the SWE-bench way (gold test patch + FAIL/PASS_TO_PASS);
-    # native tasks just run their own test command.
+    # Scoring routes three ways:
+    #   * docker backend -> deferred; the driver scores `diff` via the official
+    #     SWE-bench harness (a pinned env the local checkout can't reproduce).
+    #   * local swebench  -> the local pytest scorer (task["scorer"]).
+    #   * native          -> the task's own test command.
     detail = ""
-    if task.get("scorer"):
+    if task.get("backend") == "docker":
+        resolved, detail = False, "(pending docker scoring)"
+    elif task.get("scorer"):
         try:
             scored = task["scorer"](task)
             if isinstance(scored, tuple):

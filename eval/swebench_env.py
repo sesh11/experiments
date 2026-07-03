@@ -41,6 +41,10 @@ P2P_SAMPLE = 30          # cap PASS_TO_PASS ids per instance (argv + runtime)
 TEST_TIMEOUT = 600       # seconds, agent-facing and scoring runs
 CACHE = Path.home() / ".cache" / "fusion_swebench"
 
+# Dataset coordinates for both the local loader and the official Docker harness.
+DATASET_NAME = "princeton-nlp/SWE-bench_Verified"
+SPLIT = "test"
+
 # Untracked files we must never `git clean` away inside an instance dir.
 # (*.egg-info guards editable-install metadata in repos that don't gitignore it.)
 _KEEP = ["-e", ".venv", "-e", ".ready", "-e", "*.egg-info"]
@@ -269,31 +273,59 @@ def _reset(task: dict) -> None:
     _run(["git", "clean", "-fdq", *_KEEP], cwd=d)
 
 
-def _task(row: dict, d: Path, venv_py: str, p2p: list[str]) -> dict:
-    return {
+def _task(row: dict, d: Path, venv_py: str, p2p: list[str],
+          backend: str = "local") -> dict:
+    task = {
         "instance_id": row["instance_id"],
         "template_dir": str(d),
         "in_place": True,
         "test_cmd": f"{venv_py} -m pytest -q -p no:cacheprovider",
         "test_timeout": TEST_TIMEOUT,
         "problem_statement": row["problem_statement"],
+        "backend": backend,
         "_dir": str(d), "_venv": venv_py, "_base_commit": row["base_commit"],
         "_test_patch": row["test_patch"], "_gold_patch": row.get("patch", ""),
         "_f2p": _ids(row["FAIL_TO_PASS"]), "_p2p": p2p,
-        "reset": _reset, "scorer": _scorer,
+        "_dataset": DATASET_NAME, "_split": SPLIT,
+        "reset": _reset,
     }
+    # Local backend scores with the local pytest scorer; docker backend defers
+    # scoring to the official harness (driver calls docker_score with the diff),
+    # so it must NOT carry a `scorer` key.
+    if backend == "local":
+        task["scorer"] = _scorer
+    return task
+
+
+def _sorted_rows(ds):
+    rank = {r: i for i, r in enumerate(ALLOWLIST)}
+    return sorted((r for r in ds if r["repo"] in rank),
+                  key=lambda r: (rank[r["repo"]], r["instance_id"]))
+
+
+def list_instance_ids(limit: int = 5) -> list[str]:
+    """Just the first `limit` allowlisted Verified instance_ids — no env build.
+    Used by the Docker gold self-test, which needs only IDs (Docker does the rest)."""
+    from datasets import load_dataset
+    ds = load_dataset(DATASET_NAME, split=SPLIT)
+    return [r["instance_id"] for r in _sorted_rows(ds)[:limit]]
 
 
 # --- loader ------------------------------------------------------------------
-def load(limit: int = 15) -> list[dict]:
+def load(limit: int = 15, backend: str = "local") -> list[dict]:
+    """Prepare scoreable instances.
+
+    local backend: strict gate — the local venv must reproduce the bug AND keep
+      PASS_TO_PASS green at base, because the local pytest scorer is authoritative.
+    docker backend: relaxed gate — the official harness scores in a pinned image,
+      so we only need a runnable local checkout for the agent's edit/iterate loop.
+      We keep instances whose FAIL_TO_PASS ids at least *collect* (so the agent's
+      own test runs are meaningful) but do NOT require PASS_TO_PASS to pass at
+      base — that local drift is exactly what Docker scoring exists to bypass.
+    """
     from datasets import load_dataset  # needs HF network (works locally)
-    ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
-    rank = {r: i for i, r in enumerate(ALLOWLIST)}
-    rows = sorted((r for r in ds if r["repo"] in rank),
-                  key=lambda r: (rank[r["repo"]], r["instance_id"]))
-    # Oversample so validation-gate skips don't starve the run (the P2P-at-base
-    # gate skips more instances than the F2P gate alone did).
-    candidates = rows[: limit * 5]
+    ds = load_dataset(DATASET_NAME, split=SPLIT)
+    candidates = _sorted_rows(ds)[: limit * 5]
     tasks: list[dict] = []
     for row in candidates:
         if len(tasks) >= limit:
@@ -305,12 +337,38 @@ def load(limit: int = 15) -> list[dict]:
             continue
         d, venv_py = built
         p2p = _p2p_sample(row)
-        reason = _validate(row, d, venv_py, p2p)
+        if backend == "docker":
+            reason = _validate_docker(row, d, venv_py)
+            ok_msg = "local checkout runnable (Docker will score authoritatively)"
+        else:
+            reason = _validate(row, d, venv_py, p2p)
+            ok_msg = "env valid — F2P fails and P2P passes at base"
         if reason:
             print(f"  [skip] {iid}: {reason}")
             continue
-        print(f"  [ok]   {iid}: env valid — F2P fails and P2P passes at base")
-        tasks.append(_task(row, d, venv_py, p2p))
-    print(f"\nPrepared {len(tasks)}/{limit} scoreable instances "
+        print(f"  [ok]   {iid}: {ok_msg}")
+        tasks.append(_task(row, d, venv_py, p2p, backend=backend))
+    print(f"\nPrepared {len(tasks)}/{limit} instance(s) for backend='{backend}' "
           f"(from {len(candidates)} candidates).")
     return tasks
+
+
+def _validate_docker(row: dict, d: Path, venv_py: str) -> str | None:
+    """Relaxed gate for docker backend: only reject instances the agent could
+    not meaningfully iterate on locally (env broken, or FAIL_TO_PASS ids that
+    don't even collect). PASS_TO_PASS drift at base is tolerated — Docker scores."""
+    ok, revert = _apply_gold(d, row["test_patch"], row["base_commit"])
+    if not ok:
+        revert()
+        return "gold test patch does not apply to local checkout"
+    try:
+        rc = _pytest(venv_py, d, _ids(row["FAIL_TO_PASS"])).returncode
+    except subprocess.TimeoutExpired:
+        revert()
+        return "F2P collection run timed out"
+    revert()
+    if rc in (4, 5):
+        return "F2P ids not collectable (non-pytest format or missing)"
+    if rc in (2, 3):
+        return f"pytest errored (rc={rc}) — local env too broken to iterate"
+    return None  # rc 0 (bug not reproduced locally) or 1 (reproduced) both fine

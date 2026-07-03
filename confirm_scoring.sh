@@ -4,23 +4,26 @@
 #
 # Runs in two phases on a SMALL slice (default 5 instances):
 #
-#   Phase 1  (FREE, $0 LLM):  gold-patch self-test.
-#            Applies each instance's known-correct human fix and checks the
-#            scorer marks it RESOLVED. If this fails, the pipeline is still
+#   Phase 1  ($0 LLM):  gold-patch self-test via the OFFICIAL SWE-bench Docker
+#            harness. Scores each instance's known-correct human fix in the
+#            pinned image; every one MUST resolve. If any fails, scoring is still
 #            broken and no agent — yours or OpenCode's — could ever score here.
 #            The run STOPS if phase 1 fails, so you never spend on a bad scorer.
 #
 #   Phase 2  (CHEAP, hard $ cap): a real frontier_only + scout run on the same
-#            slice with a tight per-task cap. Now that scoring is trusted, an
-#            "unresolved" here is genuinely the agent — exactly the signal you
+#            slice, scored authoritatively in Docker. Now that scoring is trusted,
+#            an "unresolved" here is genuinely the agent — exactly the signal you
 #            need to decide whether the harness is the problem.
 #
-# Usage (machine with open network — not the web sandbox):
+# Requires Docker Desktop running. First run pulls per-instance images from
+# Docker Hub (slow, several GB, then cached).
+#
+# Usage (machine with open network + Docker — not the web sandbox):
 #   cp .env.example .env   # put your key in .env
 #   ./confirm_scoring.sh                 # 5 instances, $6 cap on phase 2
 #   ./confirm_scoring.sh 5 6             # same, explicit
 #   ./confirm_scoring.sh 3 4             # 3 instances, $4 cap
-#   ./confirm_scoring.sh 5 0             # phase 1 only (free), skip agent run
+#   ./confirm_scoring.sh 5 0             # phase 1 only (Docker gold check), no agent run
 #
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -42,10 +45,10 @@ pip install --quiet -r requirements.txt pytest
 
 echo ""
 echo "############################################################"
-echo "# PHASE 1 — FREE scoring self-test (no LLM calls)          #"
+echo "# PHASE 1 — Docker gold self-test (no LLM calls)           #"
 echo "############################################################"
-# Phase 1 needs no API key: it only builds envs and runs pytest with gold patches.
-if python -m eval.selftest_scoring --limit "$LIMIT"; then
+# Phase 1 needs no API key: it runs the official harness on the GOLD patches.
+if python -m eval.selftest_scoring --backend docker --limit "$LIMIT"; then
   echo "==> Phase 1 PASSED: scoring pipeline is trustworthy."
 else
   echo ""
@@ -70,10 +73,11 @@ echo ""
 echo "############################################################"
 echo "# PHASE 2 — cheap real agent run (hard \$${BUDGET} cap)        #"
 echo "############################################################"
-# Small slice, tight per-task cap. Because phase 1 verified scoring, every
-# 'unresolved' below is the agent's doing — read the 'why:' line + per-run log.
-python -m eval.run_eval --source swebench --limit "$LIMIT" --budget "$BUDGET" \
-  --per-task 2.5 --max-steps 30 --variants frontier_only scout
+# Small slice, tight per-task cap, scored in Docker. Because phase 1 verified
+# scoring, every 'unresolved' below is the agent's doing — read the 'why:' line
+# + per-run log.
+python -m eval.run_eval --source swebench --backend docker --limit "$LIMIT" \
+  --budget "$BUDGET" --per-task 2.5 --max-steps 30 --variants frontier_only scout
 
 echo ""
 echo "==> Report"
