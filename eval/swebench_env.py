@@ -32,9 +32,16 @@ from pathlib import Path
 # Pure-python, pip-installable repos whose SWE-bench test ids are pytest-style.
 # django/django is excluded: its FAIL_TO_PASS ids use the Django-runner format
 # ("test_x (app.Class)"), not pytest node ids.
+#
+# Order matters: instances are picked in this order (oldest id first within a
+# repo). We front-load repos whose instances build a CLEAN LOCAL env so the
+# agent gets real test feedback during its loop — pytest/flask/sympy checkouts
+# collect fine under a modern pytest. psf/requests is LAST: its oldest instances
+# (2013-era) are both flaky under Docker gold *and* uncollectable locally
+# (modern pytest can't even import their test files), which starves the agent.
 ALLOWLIST = [
-    "psf/requests", "pallets/flask", "pytest-dev/pytest", "pydata/xarray",
-    "pylint-dev/pylint", "sphinx-doc/sphinx", "sympy/sympy",
+    "pytest-dev/pytest", "pallets/flask", "sympy/sympy", "sphinx-doc/sphinx",
+    "pydata/xarray", "pylint-dev/pylint", "psf/requests",
 ]
 
 P2P_SAMPLE = 30          # cap PASS_TO_PASS ids per instance (argv + runtime)
@@ -349,37 +356,40 @@ def load(limit: int = 15, backend: str = "local",
         d, venv_py = built
         p2p = _p2p_sample(row)
         if backend == "docker":
-            reason = _validate_docker(row, d, venv_py)
-            ok_msg = "local checkout runnable (Docker will score authoritatively)"
-        else:
-            reason = _validate(row, d, venv_py, p2p)
-            ok_msg = "env valid — F2P fails and P2P passes at base"
+            # Docker scores authoritatively, so NEVER skip a built instance —
+            # skipping is how we ended up with 0 to run. The local env only
+            # decides whether the agent gets live test feedback; probe and note it.
+            usable = _local_tests_usable(row, d, venv_py)
+            note = ("local tests runnable — agent gets feedback"
+                    if usable else
+                    "local tests NOT collectable — agent edits blind (Docker still scores)")
+            print(f"  [ok]   {iid}: {note}")
+            tasks.append(_task(row, d, venv_py, p2p, backend=backend))
+            continue
+        reason = _validate(row, d, venv_py, p2p)
         if reason:
             print(f"  [skip] {iid}: {reason}")
             continue
-        print(f"  [ok]   {iid}: {ok_msg}")
+        print(f"  [ok]   {iid}: env valid — F2P fails and P2P passes at base")
         tasks.append(_task(row, d, venv_py, p2p, backend=backend))
     print(f"\nPrepared {len(tasks)}/{limit} instance(s) for backend='{backend}' "
           f"(from {len(candidates)} candidates).")
     return tasks
 
 
-def _validate_docker(row: dict, d: Path, venv_py: str) -> str | None:
-    """Relaxed gate for docker backend: only reject instances the agent could
-    not meaningfully iterate on locally (env broken, or FAIL_TO_PASS ids that
-    don't even collect). PASS_TO_PASS drift at base is tolerated — Docker scores."""
+def _local_tests_usable(row: dict, d: Path, venv_py: str) -> bool:
+    """Docker backend only: can the agent's LOCAL checkout actually run the target
+    tests, so it gets live feedback during its loop? This never gates inclusion
+    (Docker scores regardless) — it only informs the operator. Old checkouts whose
+    test files won't collect under a modern pytest return False."""
     ok, revert = _apply_gold(d, row["test_patch"], row["base_commit"])
     if not ok:
         revert()
-        return "gold test patch does not apply to local checkout"
+        return False
     try:
         rc = _pytest(venv_py, d, _ids(row["FAIL_TO_PASS"])).returncode
     except subprocess.TimeoutExpired:
         revert()
-        return "F2P collection run timed out"
+        return False
     revert()
-    if rc in (4, 5):
-        return "F2P ids not collectable (non-pytest format or missing)"
-    if rc in (2, 3):
-        return f"pytest errored (rc={rc}) — local env too broken to iterate"
-    return None  # rc 0 (bug not reproduced locally) or 1 (reproduced) both fine
+    return rc in (0, 1)  # collected (pass/fail) = usable; 2-5 = collection/env error
