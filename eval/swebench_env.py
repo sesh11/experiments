@@ -312,7 +312,8 @@ def list_instance_ids(limit: int = 5) -> list[str]:
 
 
 # --- loader ------------------------------------------------------------------
-def load(limit: int = 15, backend: str = "local") -> list[dict]:
+def load(limit: int = 15, backend: str = "local",
+         instance_ids: list[str] | None = None) -> list[dict]:
     """Prepare scoreable instances.
 
     local backend: strict gate — the local venv must reproduce the bug AND keep
@@ -322,10 +323,20 @@ def load(limit: int = 15, backend: str = "local") -> list[dict]:
       We keep instances whose FAIL_TO_PASS ids at least *collect* (so the agent's
       own test runs are meaningful) but do NOT require PASS_TO_PASS to pass at
       base — that local drift is exactly what Docker scoring exists to bypass.
+
+    instance_ids: if given, prepare EXACTLY these instances (in this order),
+      ignoring the allowlist/limit. The Docker confirm flow passes the set the
+      gold self-test verified, so the agent is only ever judged on instances
+      whose scoring we've proven trustworthy.
     """
     from datasets import load_dataset  # needs HF network (works locally)
     ds = load_dataset(DATASET_NAME, split=SPLIT)
-    candidates = _sorted_rows(ds)[: limit * 5]
+    if instance_ids:
+        by_id = {r["instance_id"]: r for r in ds}
+        candidates = [by_id[i] for i in instance_ids if i in by_id]
+        limit = len(candidates)
+    else:
+        candidates = _sorted_rows(ds)[: limit * 5]
     tasks: list[dict] = []
     for row in candidates:
         if len(tasks) >= limit:

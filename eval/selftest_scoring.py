@@ -24,7 +24,17 @@ import argparse
 from datetime import datetime
 
 
-def _docker(limit: int) -> int:
+# A rare SWE-bench instance is flaky even for the gold patch (an order-dependent
+# or environment-sensitive control test). We don't need every instance to pass —
+# we need to KNOW which ones score cleanly and run the agent only on those. The
+# pipeline is trustworthy as long as a healthy majority of gold patches resolve;
+# below this fraction, something systemic is wrong (disk, daemon, images).
+_MIN_TRUST_FRACTION = 0.5
+
+
+def _docker(limit: int, out_path: str | None = None) -> int:
+    from pathlib import Path
+
     from . import docker_score, swebench_env
     ok, reason = docker_score.preflight()
     if not ok:
@@ -34,8 +44,7 @@ def _docker(limit: int) -> int:
     if not ids:
         print("No instances found in the allowlist.")
         return 2
-    print(f"== Docker scoring self-test: GOLD patches must resolve on "
-          f"{len(ids)} instance(s) ==")
+    print(f"== Docker scoring self-test: scoring GOLD patches on {len(ids)} instance(s) ==")
     print("   First run builds/pulls a Docker image PER INSTANCE — minutes each, then")
     print("   cached. The harness prints live progress below; it is NOT frozen. To watch")
     print("   from another terminal:  docker ps   and   docker images | grep sweb\n")
@@ -49,17 +58,33 @@ def _docker(limit: int) -> int:
     for iid in resolved:
         print(f"   ✅ {iid}")
     for iid in unresolved:
-        print(f"   ❌ {iid}")
-    if len(resolved) == len(ids):
-        print("\nSCORING PIPELINE VERIFIED (Docker): every known-correct fix scores")
-        print("resolved. Any 'unresolved' in a real agent run is now the AGENT's doing,")
-        print("not the scorer. You can trust the harness and rule out a scoring artifact.")
-        return 0
-    print("\nSCORING NOT YET TRUSTWORTHY: some gold patches did not resolve. This is a")
-    print("Docker/harness/image problem, not the agent. Inspect the harness output above")
-    print("(often: image pull failed, disk full, or daemon not running). Tail:\n")
-    print(res.get("harness_tail", "")[-1500:])
-    return 1
+        print(f"   ❌ {iid}  (gold patch doesn't resolve here — excluded from the agent run)")
+
+    frac = len(resolved) / len(ids)
+    if not resolved or frac < _MIN_TRUST_FRACTION:
+        print(f"\nSCORING NOT TRUSTWORTHY: only {len(resolved)}/{len(ids)} gold patches")
+        print("resolved — too few. That points to a systemic problem (disk full, Docker")
+        print("daemon, image pulls), not one flaky instance. Inspect the harness output")
+        print("above. Not proceeding to a paid agent run.")
+        print(res.get("harness_tail", "")[-800:])
+        return 1
+
+    # Persist the verified set so the agent run uses ONLY these instances.
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text("\n".join(resolved) + "\n")
+
+    print(f"\nSCORING PIPELINE VERIFIED (Docker): {len(resolved)}/{len(ids)} known-correct")
+    print("fixes score resolved — the pipeline works. Any 'unresolved' in the agent run")
+    print("on these instances is now the AGENT's doing, not the scorer.")
+    if unresolved:
+        print(f"\nExcluding {len(unresolved)} instance(s) where even gold fails "
+              f"({', '.join(unresolved)}):")
+        print("judging the agent on an instance whose own gold patch can't score would be")
+        print("unfair. The agent run will use the verified set only.")
+    if out_path:
+        print(f"\nVerified set written to {out_path}")
+    return 0
 
 
 def _local(limit: int) -> int:
@@ -93,8 +118,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", default="docker", choices=["docker", "local"])
     ap.add_argument("--limit", type=int, default=5, help="instances to check")
+    ap.add_argument("--out", default=None,
+                    help="write the gold-verified instance ids here (one per line) "
+                         "so the agent run can be pinned to the trustworthy set")
     args = ap.parse_args()
-    return _docker(args.limit) if args.backend == "docker" else _local(args.limit)
+    if args.backend == "docker":
+        return _docker(args.limit, out_path=args.out)
+    return _local(args.limit)
 
 
 if __name__ == "__main__":

@@ -43,12 +43,17 @@ source .venv/bin/activate
 pip install --quiet -U pip
 pip install --quiet -r requirements.txt pytest
 
+VERIFIED_FILE="results/verified_instances.txt"
+
 echo ""
 echo "############################################################"
 echo "# PHASE 1 — Docker gold self-test (no LLM calls)           #"
 echo "############################################################"
-# Phase 1 needs no API key: it runs the official harness on the GOLD patches.
-if python -m eval.selftest_scoring --backend docker --limit "$LIMIT"; then
+# Phase 1 needs no API key: it runs the official harness on the GOLD patches and
+# writes the instances that scored cleanly to $VERIFIED_FILE. Phase 2 runs the
+# agent on exactly that verified set (an instance whose own gold patch can't
+# score is excluded, so the agent is never judged unfairly).
+if python -m eval.selftest_scoring --backend docker --limit "$LIMIT" --out "$VERIFIED_FILE"; then
   echo "==> Phase 1 PASSED: scoring pipeline is trustworthy."
 else
   echo ""
@@ -73,10 +78,11 @@ echo ""
 echo "############################################################"
 echo "# PHASE 2 — cheap real agent run (hard \$${BUDGET} cap)        #"
 echo "############################################################"
-# Small slice, tight per-task cap, scored in Docker. Because phase 1 verified
-# scoring, every 'unresolved' below is the agent's doing — read the 'why:' line
-# + per-run log.
-python -m eval.run_eval --source swebench --backend docker --limit "$LIMIT" \
+# Pinned to the gold-verified set from phase 1, scored in Docker. Because those
+# instances' own gold patches resolve, every 'unresolved' below is the agent's
+# doing — read the 'why:' line + per-run log.
+python -m eval.run_eval --source swebench --backend docker \
+  --instance-ids-file "$VERIFIED_FILE" \
   --budget "$BUDGET" --per-task 2.5 --max-steps 30 --variants frontier_only scout
 
 echo ""

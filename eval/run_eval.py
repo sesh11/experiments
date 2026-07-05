@@ -62,10 +62,24 @@ def main() -> None:
                     help="swebench scoring backend: 'local' pytest (fast, needs a "
                          "reproducible local env) or 'docker' (authoritative, uses "
                          "the official SWE-bench harness with pinned images)")
+    ap.add_argument("--instance-ids-file", default=None,
+                    help="run exactly the instance ids in this file (one per line). "
+                         "The confirm flow points this at the gold-verified set.")
     args = ap.parse_args()
 
+    instance_ids = None
+    if args.instance_ids_file:
+        instance_ids = [ln.strip() for ln in
+                        Path(args.instance_ids_file).read_text().splitlines()
+                        if ln.strip()]
+        if not instance_ids:
+            raise SystemExit(f"!! {args.instance_ids_file} has no instance ids")
+        print(f"Pinned to {len(instance_ids)} gold-verified instance(s) "
+              f"from {args.instance_ids_file}")
+
     scorer = _make_scorer(args) if args.source == "swebench" else None
-    task_list = tasks.load(args.source, args.limit, backend=args.backend)
+    task_list = tasks.load(args.source, args.limit, backend=args.backend,
+                           instance_ids=instance_ids)
     log = audit.Audit(_OUT)
     print(f"Loaded {len(task_list)} task(s) from '{args.source}'. "
           f"Variants: {args.variants}. Budget: ${args.budget:.2f}")
