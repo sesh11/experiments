@@ -98,7 +98,17 @@ python -m eval.run_eval --source native --variants frontier_only scout --budget 
 # 2) Full native run, all three variants
 python -m eval.run_eval --source native --budget 5
 
-# 3) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
+# 3) CONFIRM SCORING FIRST (cheap) — before spending on a big run, prove the
+#    scoring pipeline is correct and see whether you even need a better harness.
+#    Phase 1 is FREE (applies each gold solution patch, checks the scorer marks
+#    it resolved — $0 LLM). Phase 2 is a small, hard-capped real agent run.
+./confirm_scoring.sh          # 5 instances, $6 cap on the agent phase
+./confirm_scoring.sh 5 0      # phase 1 only (free): just verify scoring
+
+#    Or run the free scoring self-test directly:
+python -m eval.selftest_scoring --limit 5
+
+# 4) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
 #    tasks, with real FAIL_TO_PASS scoring. Clone locally and run one script
 #    (Cloud/Web sandbox can't: HuggingFace + arbitrary GitHub are network-blocked).
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -108,6 +118,48 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Report
 python -m eval.report          # -> results/pareto.png + table
 ```
+
+### Running the Docker scoring on AWS EC2 (required for trustworthy scores)
+
+SWE-bench only scores reliably on **x86_64 Linux**. On Apple Silicon it emulates
+x86 and even gold patches fail — so score on an Intel/AMD EC2 box.
+
+**Launch an instance:**
+- **AMI:** Ubuntu 22.04 or 24.04 (x86_64).
+- **Instance type:** an **Intel/AMD** type — `c6i.2xlarge` or `m6i.2xlarge` (8 vCPU,
+  16–32 GB). **Not** a `g`/Graviton (`*g.*`) type — those are ARM and have the exact
+  same problem as the Mac.
+- **Storage:** root EBS **100–160 GB** (Docker images are large; the 8 GB default
+  fills up fast).
+- **Security group / network:** default outbound is fine — it needs to reach
+  Docker Hub, HuggingFace, and the Anthropic API.
+
+**Set it up and run:**
+```bash
+# on the instance, after cloning this repo and checking out your branch:
+sudo bash scripts/ec2_bootstrap.sh     # installs docker+python, one time
+exit                                    # re-login so docker group applies
+ssh ...                                 # reconnect
+docker run --rm hello-world             # sanity check (no sudo needed)
+
+cp .env.example .env && nano .env       # paste ANTHROPIC_API_KEY
+./confirm_scoring.sh 5 0                 # FREE gold check — expect 5/5
+./confirm_scoring.sh 5 6                 # then the real ~$6 comparison
+```
+The bootstrap refuses to run on ARM and warns on low disk, so you can't
+accidentally recreate the Mac problem.
+
+### Reading a run: the audit log
+
+Every `(task, variant)` run prints a compact block and writes a full-detail log
+to `results/runs/<stamp>/<task>__<variant>.log` (plus a machine-readable
+`runs.jsonl`). The terminal block's **`why:`** line attributes each outcome so a
+failure is never a guess — it distinguishes *agent* problems (no diff, edited a
+test file, wrong/incomplete fix, broke PASS_TO_PASS) from *scoring/env* problems
+(gold patch won't apply, pytest crashed collecting) from *budget* cutoffs. The
+per-run `.log` has the complete tool-call trace (main **and** scout), the diff
+with test-file flagging, and the **actual pytest output** from scoring. Start
+with `why:`, open the `.log` when you need the evidence.
 
 Budget is enforced two ways: a **global** `--budget` cap across the whole run and a
 **per-task** cap (`--per-task`, default $3). When the budget is exhausted the run stops

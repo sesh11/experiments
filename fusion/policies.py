@@ -7,7 +7,7 @@ has. Seams are left for the deferred variants (routed / self-verifying).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import config, orchestrator
 from .agent import Agent
@@ -27,6 +27,11 @@ class PolicyResult:
     budget_hit: bool = False
     error: str = ""
     resolve_detail: str = ""
+    steps: int = 0                       # tool-loop steps the main agent used
+    finished: bool = False               # did the agent call finish()?
+    trace: list = field(default_factory=list)         # main-agent tool-call trace
+    scout_trace: list = field(default_factory=list)   # sub-agent (scout) trace
+    score_artifacts: dict = field(default_factory=dict)  # pytest evidence from scoring
 
 
 def _task_prompt(task: dict) -> str:
@@ -70,16 +75,18 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
     ws = _make_ws(task)
     client = LLMClient(ledger, max_tokens=cfg.max_tokens)
     tools = WorkspaceTools(ws)
+    scout_trace: list = []
 
     def execute(name: str, inp: dict) -> tuple[str, bool]:
         if name == "scout":
             try:
-                m = orchestrator.make_scout_map(
+                m, sub_trace = orchestrator.make_scout_map(
                     inp["question"], ws, client,
                     max_steps=cfg.scout_max_steps,
                     sidekick_model=config.MODEL_SIDEKICK,
                     thinking=cfg.sidekick_thinking,
                 )
+                scout_trace.extend(sub_trace)
                 return m, False
             except BudgetExceeded:
                 raise
@@ -93,15 +100,20 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
         tools=[SCOUT_TOOL] + WRITE_TOOLS + [FINISH_TOOL],
         client=client, thinking=cfg.main_thinking, max_steps=cfg.max_steps,
     )
-    return _finalize("scout", task, ws, ledger, agent, execute)
+    return _finalize("scout", task, ws, ledger, agent, execute, scout_trace=scout_trace)
 
 
-def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
+def _finalize(variant, task, ws, ledger, agent, execute,
+              scout_trace: list | None = None) -> PolicyResult:
     budget_hit = False
     err = ""
+    steps = 0
+    finished = False
+    trace: list = []
     try:
         result = agent.run(_task_prompt(task), execute)
         summary = result.text
+        steps, finished, trace = result.steps, result.finished, result.trace
     except BudgetExceeded as exc:
         budget_hit = True
         summary = f"(budget hit) {exc}"
@@ -111,10 +123,15 @@ def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
     # Capture the agent's diff BEFORE scoring: the scorer applies/reverts the
     # gold test patch and must not pollute the recorded change.
     diff = ws.diff()
-    # swebench tasks score the SWE-bench way (gold test patch + FAIL/PASS_TO_PASS);
-    # native tasks just run their own test command.
+    # Scoring routes three ways:
+    #   * docker backend -> deferred; the driver scores `diff` via the official
+    #     SWE-bench harness (a pinned env the local checkout can't reproduce).
+    #   * local swebench  -> the local pytest scorer (task["scorer"]).
+    #   * native          -> the task's own test command.
     detail = ""
-    if task.get("scorer"):
+    if task.get("backend") == "docker":
+        resolved, detail = False, "(pending docker scoring)"
+    elif task.get("scorer"):
         try:
             scored = task["scorer"](task)
             if isinstance(scored, tuple):
@@ -128,7 +145,9 @@ def _finalize(variant, task, ws, ledger, agent, execute) -> PolicyResult:
     out = PolicyResult(
         variant=variant, resolved=resolved, diff=diff, summary=summary,
         ledger=ledger.summary(), budget_hit=budget_hit, error=err,
-        resolve_detail=detail,
+        resolve_detail=detail, steps=steps, finished=finished, trace=trace,
+        scout_trace=scout_trace or [],
+        score_artifacts=task.get("_score_artifacts", {}),
     )
     ws.cleanup()
     return out

@@ -7,10 +7,13 @@ from .llm import LLMClient
 from .tools import WorkspaceTools
 from .workspace import Workspace
 
-SOLVER_SYSTEM = """You are an expert software engineer fixing a bug in a small repository.
+SOLVER_SYSTEM = """You are an expert software engineer fixing a bug in a repository.
 Work in this loop: locate the defect, make the minimal correct change, then run the
 tests to confirm they pass. Keep the change tightly scoped to the reported problem —
-do not refactor, rename, or add unrelated code. When the tests pass, call finish()
+do not refactor, rename, or add unrelated code. NEVER modify the repository's
+existing test files: grading restores them to their original state and runs the
+official tests, so any "fix" made inside a test file is discarded and scores zero.
+The fix must live in the library/source code. When the tests pass, call finish()
 with a one-line summary. If tests still fail after a few attempts, call finish()
 anyway with what you found."""
 
@@ -24,8 +27,9 @@ every token you return to them."""
 
 def make_scout_map(question: str, ws: Workspace, client: LLMClient,
                    max_steps: int, sidekick_model: str,
-                   thinking: dict | None) -> str:
-    """Spin a fresh read-only Scout agent (own context) and return its cited map."""
+                   thinking: dict | None) -> tuple[str, list]:
+    """Spin a fresh read-only Scout agent (own context). Returns (cited map,
+    the scout's own tool-call trace) so the run is fully auditable."""
     from .tools import READ_TOOLS
     tools = WorkspaceTools(ws)
     scout = Agent(
@@ -38,4 +42,4 @@ def make_scout_map(question: str, ws: Workspace, client: LLMClient,
         f"Explore the repo with your read-only tools, then reply with the cited map."
     )
     result = scout.run(prompt, tools.execute)
-    return result.text or "(scout returned no map)"
+    return (result.text or "(scout returned no map)"), result.trace
