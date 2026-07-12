@@ -163,6 +163,41 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python -m eval.report          # -> results/pareto.png + table
 ```
 
+### Running on AWS EC2 (fast, trustworthy Docker scoring)
+
+SWE-bench images are **x86_64**. On Apple Silicon scoring runs under emulation —
+it works, but it's slow; an Intel/AMD box is the fast path for anything bigger
+than a few instances. The whole stack (orchestrator + all three runtimes) runs
+bare on the box; Docker is only used by the scoring step.
+
+**Launch an instance:**
+- **AMI:** Ubuntu 22.04 or 24.04 (x86_64).
+- **Instance type:** an **Intel/AMD** type — `c6i.2xlarge` or `m6i.2xlarge` (8 vCPU,
+  16–32 GB). **Not** a Graviton (`*g.*`) type — those are ARM, same emulation
+  problem as the Mac (the bootstrap refuses to run there).
+- **Storage:** root EBS **100–160 GB** (Docker images are large; the 8 GB default
+  fills up fast).
+- **Security group / network:** default outbound is fine — it needs to reach
+  Docker Hub, HuggingFace, npm, and the Anthropic API.
+
+**Set it up and run:**
+```bash
+# on the instance, after cloning this repo and checking out your branch:
+sudo bash scripts/ec2_bootstrap.sh      # docker + python venv + node/pi, one time
+exit                                     # re-login so the docker group applies
+ssh ...                                  # reconnect
+docker run --rm hello-world              # sanity check (no sudo needed)
+
+cp .env.example .env && nano .env        # paste ANTHROPIC_API_KEY
+source .venv/bin/activate
+python scripts/smoke_workspace.py                          # $0 sandbox check
+python -m eval.selftest_scoring --backend docker --limit 3 # $0 gold check — 3/3
+set -a; . ./.env; set +a                                   # load the key
+python -m eval.run_eval --source swebench --backend docker \
+  --limit 3 --variants baseline-fusion baseline-stirrup baseline-pi \
+  --per-task 1.5 --budget 12 --max-steps 30 --no-judge     # ~$7 parity slice
+```
+
 ### Reading a run: the audit log
 
 Every `(task, variant)` run prints a compact block and writes a full-detail log
