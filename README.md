@@ -59,6 +59,15 @@ clearly above `sidekick_only` on quality.
 ## Layout
 
 ```
+orchestrator/
+  variants.py      variant registry + orchestration patterns; owns PolicyResult
+                   and the shared diff/score/cleanup packaging
+runtimes/
+  base.py          AgentRuntime protocol: solve a task in a Workspace, record
+                   usage in the shared Ledger, honor the budget guard
+  fusion_rt.py     the in-repo fusion loop as a runtime (parity baseline)
+  stirrup_rt.py    Stirrup (Artificial Analysis) embedded as a library
+  pi_rt.py         pi (badlogic) driven as a subprocess in JSON mode
 fusion/
   config.py        model IDs + pinned pricing + budget guard settings
   llm.py           Anthropic wrapper: prompt caching + per-role token/cost ledger
@@ -66,7 +75,7 @@ fusion/
   tools.py         tool schemas + dispatcher over a Workspace
   agent.py         generic tool-use loop; one instance = one warm-cache context
   orchestrator.py  solver/scout prompts + Scout delegation wiring
-  policies.py      the three variants (frontier_only / sidekick_only / scout)
+  policies.py      the three legacy variants (frontier_only / sidekick_only / scout)
 eval/
   tasks.py         native mini-set loader + optional SWE-bench Verified slice
   judge.py         "would you merge?" rubric (0-100 + would_merge)
@@ -76,11 +85,46 @@ scripts/
   smoke_workspace.py   no-LLM check of the workspace/test loop
 ```
 
+## Agent runtimes
+
+The agent loop is pluggable. A *runtime* is one harness behind the
+`AgentRuntime` protocol (`runtimes/base.py`); the orchestrator picks a runtime
+and model per variant, and every runtime records usage into the same Ledger at
+the same pinned pricing, so cost numbers stay comparable.
+
+| variant            | harness                                    | notes |
+|--------------------|--------------------------------------------|-------|
+| `baseline-fusion`  | in-repo fusion loop                        | parity baseline; same loop as `frontier_only` |
+| `baseline-stirrup` | [Stirrup](https://github.com/ArtificialAnalysis/Stirrup), embedded | `pip install -r requirements.txt` covers it |
+| `baseline-pi`      | [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), subprocess | optional: `npm i -g @mariozechner/pi-coding-agent`; `PI_BIN` overrides discovery. Skipped with an error row if absent. |
+
+```bash
+# Parity check: same tasks, same model, three harnesses
+python -m eval.run_eval --source native \
+  --variants baseline-fusion baseline-stirrup baseline-pi --no-judge --budget 3
+```
+
+Cost-comparability caveats:
+* **Stirrup** reports no cache split, so all its input tokens are billed at the
+  full input rate (conservative overestimate), and its litellm path does no
+  prompt caching — expect ~2x fusion's cost on small tasks.
+* **pi** self-reports a session cost, but from its bundled model registry,
+  which may not know newer model ids. The ledger recomputes from token counts
+  at pinned prices; pi's own figure is kept in
+  `score_artifacts.runtime_extra.pi_reported_cost_usd` as a cross-check, and a
+  warning is printed when the two deviate >10%.
+* **pi** has no turn-limit flag; the wall-clock cap
+  (`RunConfig.runtime_timeout_s`, default 1200s) is the in-flight guard and its
+  usage is accounted post-hoc at session end.
+
 ## Setup
 
 ```bash
-pip install -r requirements.txt        # anthropic, datasets, matplotlib, (pytest)
+pip install -r requirements.txt        # anthropic, datasets, matplotlib, stirrup[litellm], (pytest)
 export ANTHROPIC_API_KEY=sk-ant-...     # REQUIRED for any run that calls the API
+
+# optional, only for the baseline-pi variant:
+npm i -g @mariozechner/pi-coding-agent
 ```
 
 > **Prerequisite:** the eval run needs an API key. Building/inspecting the harness and
