@@ -3,3 +3,8 @@ datasets>=2.14.0
 matplotlib>=3.7.0
 # Official SWE-bench harness — authoritative Docker scoring (--backend docker).
 swebench>=4.0.0
+# Stirrup agent runtime (baseline-stirrup variant). fastapi/orjson are litellm
+# runtime requirements it does not declare but imports for tool-schema calls.
+stirrup[litellm]==0.1.12
+fastapi>=0.115.0
+orjson>=3.10.0
