@@ -17,7 +17,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from fusion import config, policies
+from fusion import config
+from orchestrator import variants
 from . import audit, judge, tasks
 
 _OUT = Path("results")
@@ -52,7 +53,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="native", choices=["native", "swebench"])
     ap.add_argument("--limit", type=int, default=None, help="max tasks")
-    ap.add_argument("--variants", nargs="+", default=policies.ALL_VARIANTS)
+    ap.add_argument("--variants", nargs="+", default=variants.ALL_VARIANTS)
     ap.add_argument("--budget", type=float, default=25.0, help="global $ cap")
     ap.add_argument("--per-task", type=float, default=3.0, help="$ cap per variant/task")
     ap.add_argument("--no-judge", action="store_true", help="skip the quality judge")
@@ -91,7 +92,7 @@ def main() -> None:
             )
             if args.max_steps:
                 cfg.max_steps = args.max_steps
-            res = policies.run_variant(variant, task, cfg)
+            res = variants.run_variant(variant, task, cfg)
             run_cost = res.ledger.get("total_cost_usd", 0.0)
             spent += run_cost
 

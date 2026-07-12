@@ -46,7 +46,13 @@ def cost_for(model: str, *, input_tokens: int, output_tokens: int,
 
 
 def _normalize(model: str) -> str:
-    """Map dated/aliased IDs onto a pricing key."""
+    """Map dated/aliased/provider-prefixed IDs onto a pricing key.
+
+    External runtimes address models as e.g. "anthropic/claude-sonnet-5"
+    (LiteLLM/pi provider syntax); pricing keys are bare Anthropic ids.
+    """
+    if "/" in model:
+        model = model.rsplit("/", 1)[-1]
     if model.startswith("claude-sonnet-5"):
         return "claude-sonnet-5"
     if model.startswith("claude-haiku-4-5"):
@@ -66,3 +72,6 @@ class RunConfig:
     # (Haiku 4.5 has no adaptive mode; we omit the field there.)
     main_thinking: dict | None = field(default_factory=lambda: {"type": "disabled"})
     sidekick_thinking: dict | None = None
+    # Wall-clock cap for subprocess runtimes (pi); their budget is only
+    # accounted post-hoc, so time is the in-flight guard.
+    runtime_timeout_s: int = 1200
