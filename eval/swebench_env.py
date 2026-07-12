@@ -32,10 +32,18 @@ from pathlib import Path
 # Pure-python, pip-installable repos whose SWE-bench test ids are pytest-style.
 # django/django is excluded: its FAIL_TO_PASS ids use the Django-runner format
 # ("test_x (app.Class)"), not pytest node ids.
+# psf/requests is excluded: its old test suites hit live httpbin.org and fail
+# with 503s inside the pinned harness images — the $0 gold self-test showed the
+# GOLD patches of 4/5 sampled instances unresolved there (2026-07-12).
 ALLOWLIST = [
-    "psf/requests", "pallets/flask", "pytest-dev/pytest", "pydata/xarray",
+    "pallets/flask", "pytest-dev/pytest", "pydata/xarray",
     "pylint-dev/pylint", "sphinx-doc/sphinx", "sympy/sympy",
 ]
+
+# Single instances whose GOLD patch does not resolve in the official pinned
+# images — proven by the $0 gold self-test (selftest_scoring), so failures
+# there say nothing about an agent. Add ids here with the selftest date.
+DENYLIST: set[str] = set()
 
 P2P_SAMPLE = 30          # cap PASS_TO_PASS ids per instance (argv + runtime)
 TEST_TIMEOUT = 600       # seconds, agent-facing and scoring runs
@@ -299,7 +307,8 @@ def _task(row: dict, d: Path, venv_py: str, p2p: list[str],
 
 def _sorted_rows(ds):
     rank = {r: i for i, r in enumerate(ALLOWLIST)}
-    return sorted((r for r in ds if r["repo"] in rank),
+    return sorted((r for r in ds
+                   if r["repo"] in rank and r["instance_id"] not in DENYLIST),
                   key=lambda r: (rank[r["repo"]], r["instance_id"]))
 
 
