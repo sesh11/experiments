@@ -32,18 +32,17 @@ from pathlib import Path
 # Pure-python, pip-installable repos whose SWE-bench test ids are pytest-style.
 # django/django is excluded: its FAIL_TO_PASS ids use the Django-runner format
 # ("test_x (app.Class)"), not pytest node ids.
-# psf/requests is excluded: its old test suites hit live httpbin.org and fail
-# with 503s inside the pinned harness images — the $0 gold self-test showed the
-# GOLD patches of 4/5 sampled instances unresolved there (2026-07-12).
+#
+# Order matters: instances are picked in this order (oldest id first within a
+# repo). We front-load repos whose instances build a CLEAN LOCAL env so the
+# agent gets real test feedback during its loop — pytest/flask/sympy checkouts
+# collect fine under a modern pytest. psf/requests is LAST: its oldest instances
+# (2013-era) are both flaky under Docker gold *and* uncollectable locally
+# (modern pytest can't even import their test files), which starves the agent.
 ALLOWLIST = [
-    "pallets/flask", "pytest-dev/pytest", "pydata/xarray",
-    "pylint-dev/pylint", "sphinx-doc/sphinx", "sympy/sympy",
+    "pytest-dev/pytest", "pallets/flask", "sympy/sympy", "sphinx-doc/sphinx",
+    "pydata/xarray", "pylint-dev/pylint", "psf/requests",
 ]
-
-# Single instances whose GOLD patch does not resolve in the official pinned
-# images — proven by the $0 gold self-test (selftest_scoring), so failures
-# there say nothing about an agent. Add ids here with the selftest date.
-DENYLIST: set[str] = set()
 
 P2P_SAMPLE = 30          # cap PASS_TO_PASS ids per instance (argv + runtime)
 TEST_TIMEOUT = 600       # seconds, agent-facing and scoring runs
@@ -307,8 +306,7 @@ def _task(row: dict, d: Path, venv_py: str, p2p: list[str],
 
 def _sorted_rows(ds):
     rank = {r: i for i, r in enumerate(ALLOWLIST)}
-    return sorted((r for r in ds
-                   if r["repo"] in rank and r["instance_id"] not in DENYLIST),
+    return sorted((r for r in ds if r["repo"] in rank),
                   key=lambda r: (rank[r["repo"]], r["instance_id"]))
 
 
@@ -321,7 +319,8 @@ def list_instance_ids(limit: int = 5) -> list[str]:
 
 
 # --- loader ------------------------------------------------------------------
-def load(limit: int = 15, backend: str = "local") -> list[dict]:
+def load(limit: int = 15, backend: str = "local",
+         instance_ids: list[str] | None = None) -> list[dict]:
     """Prepare scoreable instances.
 
     local backend: strict gate — the local venv must reproduce the bug AND keep
@@ -331,10 +330,20 @@ def load(limit: int = 15, backend: str = "local") -> list[dict]:
       We keep instances whose FAIL_TO_PASS ids at least *collect* (so the agent's
       own test runs are meaningful) but do NOT require PASS_TO_PASS to pass at
       base — that local drift is exactly what Docker scoring exists to bypass.
+
+    instance_ids: if given, prepare EXACTLY these instances (in this order),
+      ignoring the allowlist/limit. The Docker confirm flow passes the set the
+      gold self-test verified, so the agent is only ever judged on instances
+      whose scoring we've proven trustworthy.
     """
     from datasets import load_dataset  # needs HF network (works locally)
     ds = load_dataset(DATASET_NAME, split=SPLIT)
-    candidates = _sorted_rows(ds)[: limit * 5]
+    if instance_ids:
+        by_id = {r["instance_id"]: r for r in ds}
+        candidates = [by_id[i] for i in instance_ids if i in by_id]
+        limit = len(candidates)
+    else:
+        candidates = _sorted_rows(ds)[: limit * 5]
     tasks: list[dict] = []
     for row in candidates:
         if len(tasks) >= limit:
@@ -347,37 +356,40 @@ def load(limit: int = 15, backend: str = "local") -> list[dict]:
         d, venv_py = built
         p2p = _p2p_sample(row)
         if backend == "docker":
-            reason = _validate_docker(row, d, venv_py)
-            ok_msg = "local checkout runnable (Docker will score authoritatively)"
-        else:
-            reason = _validate(row, d, venv_py, p2p)
-            ok_msg = "env valid — F2P fails and P2P passes at base"
+            # Docker scores authoritatively, so NEVER skip a built instance —
+            # skipping is how we ended up with 0 to run. The local env only
+            # decides whether the agent gets live test feedback; probe and note it.
+            usable = _local_tests_usable(row, d, venv_py)
+            note = ("local tests runnable — agent gets feedback"
+                    if usable else
+                    "local tests NOT collectable — agent edits blind (Docker still scores)")
+            print(f"  [ok]   {iid}: {note}")
+            tasks.append(_task(row, d, venv_py, p2p, backend=backend))
+            continue
+        reason = _validate(row, d, venv_py, p2p)
         if reason:
             print(f"  [skip] {iid}: {reason}")
             continue
-        print(f"  [ok]   {iid}: {ok_msg}")
+        print(f"  [ok]   {iid}: env valid — F2P fails and P2P passes at base")
         tasks.append(_task(row, d, venv_py, p2p, backend=backend))
     print(f"\nPrepared {len(tasks)}/{limit} instance(s) for backend='{backend}' "
           f"(from {len(candidates)} candidates).")
     return tasks
 
 
-def _validate_docker(row: dict, d: Path, venv_py: str) -> str | None:
-    """Relaxed gate for docker backend: only reject instances the agent could
-    not meaningfully iterate on locally (env broken, or FAIL_TO_PASS ids that
-    don't even collect). PASS_TO_PASS drift at base is tolerated — Docker scores."""
+def _local_tests_usable(row: dict, d: Path, venv_py: str) -> bool:
+    """Docker backend only: can the agent's LOCAL checkout actually run the target
+    tests, so it gets live feedback during its loop? This never gates inclusion
+    (Docker scores regardless) — it only informs the operator. Old checkouts whose
+    test files won't collect under a modern pytest return False."""
     ok, revert = _apply_gold(d, row["test_patch"], row["base_commit"])
     if not ok:
         revert()
-        return "gold test patch does not apply to local checkout"
+        return False
     try:
         rc = _pytest(venv_py, d, _ids(row["FAIL_TO_PASS"])).returncode
     except subprocess.TimeoutExpired:
         revert()
-        return "F2P collection run timed out"
+        return False
     revert()
-    if rc in (4, 5):
-        return "F2P ids not collectable (non-pytest format or missing)"
-    if rc in (2, 3):
-        return f"pytest errored (rc={rc}) — local env too broken to iterate"
-    return None  # rc 0 (bug not reproduced locally) or 1 (reproduced) both fine
+    return rc in (0, 1)  # collected (pass/fail) = usable; 2-5 = collection/env error

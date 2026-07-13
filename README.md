@@ -197,6 +197,8 @@ python -m eval.run_eval --source swebench --backend docker \
   --limit 3 --variants baseline-fusion baseline-stirrup baseline-pi \
   --per-task 1.5 --budget 12 --max-steps 30 --no-judge     # ~$7 parity slice
 ```
+The bootstrap refuses to run on ARM and warns on low disk, so you can't
+accidentally recreate the Mac problem.
 
 ### Reading a run: the audit log
 

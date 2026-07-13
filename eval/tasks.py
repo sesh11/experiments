@@ -48,12 +48,15 @@ def load_native(limit: int | None = None) -> list[dict]:
 
 
 def load(source: str, limit: int | None = None,
-         backend: str = "local") -> list[dict]:
+         backend: str = "local",
+         instance_ids: list[str] | None = None) -> list[dict]:
     if source == "native":
         return load_native(limit)
     if source == "swebench":
         # Real per-instance envs. backend='local' scores with a local pytest
         # scorer; backend='docker' defers to the official SWE-bench harness.
+        # instance_ids (if given) pins the exact set — e.g. the gold-verified set.
         from . import swebench_env
-        return swebench_env.load(limit or 15, backend=backend)
+        return swebench_env.load(limit or 15, backend=backend,
+                                 instance_ids=instance_ids)
     raise ValueError(f"unknown task source: {source}")
