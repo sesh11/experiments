@@ -36,19 +36,30 @@ class Ledger:
     by_role: dict[str, RoleUsage] = field(default_factory=lambda: defaultdict(RoleUsage))
 
     def record(self, role: str, model: str, usage) -> None:
-        inp = getattr(usage, "input_tokens", 0) or 0
-        out = getattr(usage, "output_tokens", 0) or 0
-        cw = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        cr = getattr(usage, "cache_read_input_tokens", 0) or 0
+        """Record one Anthropic-SDK usage object (main fusion-loop path)."""
+        self.record_tokens(
+            role, model,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        )
+
+    def record_tokens(self, role: str, model: str, *, input_tokens: int,
+                      output_tokens: int, cache_write_tokens: int = 0,
+                      cache_read_tokens: int = 0) -> None:
+        """Record explicit token counts — the entry point for external runtimes
+        (Stirrup, pi) whose usage objects aren't Anthropic-SDK shaped. Cost is
+        always recomputed from pinned pricing so numbers stay comparable."""
         cost = config.cost_for(
-            model, input_tokens=inp, output_tokens=out,
-            cache_write_tokens=cw, cache_read_tokens=cr,
+            model, input_tokens=input_tokens, output_tokens=output_tokens,
+            cache_write_tokens=cache_write_tokens, cache_read_tokens=cache_read_tokens,
         )
         r = self.by_role[role]
-        r.input_tokens += inp
-        r.output_tokens += out
-        r.cache_write_tokens += cw
-        r.cache_read_tokens += cr
+        r.input_tokens += input_tokens
+        r.output_tokens += output_tokens
+        r.cache_write_tokens += cache_write_tokens
+        r.cache_read_tokens += cache_read_tokens
         r.cost_usd += cost
         r.calls += 1
         if self.total_cost > self.cap_usd:

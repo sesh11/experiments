@@ -1,0 +1,4 @@
+task,variant,resolved,resolve_detail,steps,finished,test_files_touched,quality,would_merge,run_cost_usd,budget_hit,error,total_cost_usd,main_cost_usd,main_input_tokens,main_output_tokens,main_cache_read_tokens,main_calls
+pallets__flask-5014,baseline-fusion,True,F2P 1/1; P2P 59/59,21,True,False,,,0.5821,False,,0.5821,0.5821,178055,2418,23980,21
+pallets__flask-5014,baseline-stirrup,True,F2P 1/1; P2P 59/59,0,False,True,,,0.6501,True,,0.6501,0.6501,195136,4313,0,24
+pallets__flask-5014,baseline-pi,True,F2P 1/1; P2P 59/59,21,True,True,,,0.1472,False,,0.1472,0.1472,42,3853,142086,1
