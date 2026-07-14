@@ -159,14 +159,19 @@ _REGISTRY: dict[str, VariantSpec] = {
 }
 
 _LEGACY = ("frontier_only", "sidekick_only", "scout")
+# New orchestrator patterns that run on the same fusion loop (dual persistent
+# contexts) and are toggled by name via --variants. `inverted` = Haiku plans and
+# locates, Sonnet authors the edit from the brief.
+_FUSION_PATTERNS = _LEGACY + ("inverted",)
 
-# Legacy defaults preserved so a bare `python -m eval.run_eval` is unchanged.
-ALL_VARIANTS: list[str] = list(_LEGACY)
+# Default set for a bare `python -m eval.run_eval`: the three baselines plus the
+# new patterns, so each toggle is compared against frontier_only / sidekick_only.
+ALL_VARIANTS: list[str] = list(_FUSION_PATTERNS)
 
 
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     """Run one variant on one task; never raises for an unavailable runtime."""
-    if name in _LEGACY:
+    if name in _FUSION_PATTERNS:
         from fusion import policies
         return policies.run_variant(name, task, cfg)
     spec = _REGISTRY.get(name)

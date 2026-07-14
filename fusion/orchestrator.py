@@ -24,6 +24,22 @@ short clause each on why they are relevant and what the likely defect is. Do not
 large file bodies — cite and summarize. Be precise and brief; the engineer pays for
 every token you return to them."""
 
+PLANNER_SYSTEM = """You are a read-only repository Planner-Locator. You never edit code.
+A senior engineer will author the fix FROM YOUR BRIEF ALONE, without exploring the repository
+themselves, so the brief must be self-contained and correct. Explore with your read-only tools,
+then return a COMPACT brief with exactly these sections:
+
+1. ROOT CAUSE — 1-2 sentences naming the actual defect.
+2. EDIT PLAN — the specific `path:line` site(s) to change and precisely what the change is.
+3. CODE CONTEXT — for each edit site, paste the exact current lines (with a few lines of
+   surrounding context) VERBATIM, so the engineer can find the precise text to replace without
+   reopening the file.
+4. TESTS — the test path or pytest `-k` expression that exercises this fix.
+
+Be precise and brief; cite only what you actually read. Getting the location and the verbatim
+code context right matters far more than length — a vague or wrong location makes the whole
+brief worthless."""
+
 
 def make_scout_map(question: str, ws: Workspace, client: LLMClient,
                    max_steps: int, sidekick_model: str,
@@ -43,3 +59,21 @@ def make_scout_map(question: str, ws: Workspace, client: LLMClient,
     )
     result = scout.run(prompt, tools.execute)
     return (result.text or "(scout returned no map)"), result.trace
+
+
+def make_plan_brief(task_prompt_text: str, ws: Workspace, client: LLMClient,
+                    max_steps: int, planner_model: str,
+                    thinking: dict | None) -> tuple[str, list]:
+    """Spin a read-only Planner-Locator (the cheap model). It both localizes the
+    defect and drafts the fix plan, returning a self-contained brief the frontier
+    author works from without exploring the repo. Returns (brief, planner trace)."""
+    from .tools import READ_TOOLS
+    tools = WorkspaceTools(ws)
+    planner = Agent(
+        role="sidekick", model=planner_model, system=PLANNER_SYSTEM,
+        tools=READ_TOOLS, client=client, thinking=thinking, max_steps=max_steps,
+    )
+    prompt = ("Locate the defect and write the self-contained fix brief for this task.\n\n"
+              + task_prompt_text)
+    result = planner.run(prompt, tools.execute)
+    return (result.text or "(planner returned no brief)"), result.trace

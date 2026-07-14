@@ -70,6 +70,63 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
     return _finalize("scout", task, ws, ledger, agent, execute, scout_trace=scout_trace)
 
 
+# read_file only: targeted reads of cited paths, but no repo-wide exploration —
+# that (search/list_dir) is what the cheap planner already paid for.
+_READ_FILE_ONLY = [t for t in READ_TOOLS if t["name"] == "read_file"]
+
+
+def _author_prompt(task: dict, brief: str) -> str:
+    """The frontier author's prompt: the task plus the planner's fix brief."""
+    return (
+        task_prompt(task)
+        + "\n\n--- LOCATOR BRIEF (from a read-only planner sidekick) ---\n"
+        + brief
+        + "\n--- END BRIEF ---\n\n"
+        "A cheaper sidekick already located the defect and drafted the plan above. Trust it as "
+        "your starting point but stay responsible for correctness: you have read_file (targeted "
+        "reads of the cited paths only — there is no repo-wide search), the edit tools, and "
+        "run_tests. Author the minimal correct fix, run the cited tests to confirm, then finish()."
+    )
+
+
+def _run_inverted(task: dict, cfg: config.RunConfig) -> PolicyResult:
+    """inverted (Haiku plans+locates, Sonnet authors): the cheap model bears the
+    token-heavy exploration and drafts a fix brief; the frontier model authors the
+    edit from that brief with targeted reads only (no repo-wide search)."""
+    ledger = Ledger(cap_usd=cfg.budget_usd)
+    ws = make_ws(task)
+    client = LLMClient(ledger, max_tokens=cfg.max_tokens)
+    tools = WorkspaceTools(ws)
+    plan_trace: list = []
+    budget_hit = False
+    err = ""
+    summary, steps, finished = "", 0, False
+    trace: list = []
+    try:
+        brief, plan_trace = orchestrator.make_plan_brief(
+            task_prompt(task), ws, client,
+            max_steps=cfg.scout_max_steps,
+            planner_model=config.MODEL_SIDEKICK,
+            thinking=cfg.sidekick_thinking,
+        )
+        author = Agent(
+            role="main", model=config.MODEL_MAIN, system=orchestrator.SOLVER_SYSTEM,
+            tools=_READ_FILE_ONLY + WRITE_TOOLS + [FINISH_TOOL],
+            client=client, thinking=cfg.main_thinking, max_steps=cfg.max_steps,
+        )
+        result = author.run(_author_prompt(task, brief), tools.execute)
+        summary, steps, finished, trace = (
+            result.text, result.steps, result.finished, result.trace)
+    except BudgetExceeded as exc:
+        budget_hit = True
+        summary = f"(budget hit) {exc}"
+    except Exception as exc:  # keep the run alive; record the failure
+        err = f"{type(exc).__name__}: {exc}"
+    return finalize("inverted", task, ws, ledger, summary=summary, steps=steps,
+                    finished=finished, trace=trace, scout_trace=plan_trace,
+                    budget_hit=budget_hit, error=err)
+
+
 def _finalize(variant, task, ws, ledger, agent, execute,
               scout_trace: list | None = None) -> PolicyResult:
     budget_hit = False
@@ -102,7 +159,9 @@ def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
                                   model=config.MODEL_SIDEKICK, thinking=cfg.sidekick_thinking)
     if name == "scout":
         return _run_scout(task, cfg)
+    if name == "inverted":
+        return _run_inverted(task, cfg)
     raise ValueError(f"unknown variant: {name}")
 
 
-ALL_VARIANTS = ["frontier_only", "sidekick_only", "scout"]
+ALL_VARIANTS = ["frontier_only", "sidekick_only", "scout", "inverted"]
