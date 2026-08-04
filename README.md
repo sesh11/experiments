@@ -45,16 +45,20 @@ We can't run FrontierCode (Cognition withholds the tasks). So we validate on a p
 proxy — a bundled native mini-set by default, or a SWE-bench Verified slice — and add a
 lightweight LLM **"would you merge this?"** judge to echo FrontierCode's quality axis.
 
-The deliverable is a **cost-vs-quality** comparison across three variants:
+The deliverable is a **cost-vs-quality** comparison across the orchestration variants:
 
-| variant          | main        | sidekick    | idea under test |
-|------------------|-------------|-------------|-----------------|
-| `frontier_only`  | Sonnet 5    | –           | high-cost baseline |
-| `sidekick_only`  | –           | Haiku 4.5   | low-cost baseline |
-| `scout`          | Sonnet 5    | Haiku 4.5   | **A — read-only Scout** |
+| variant          | plans / locates | authors edit | idea under test |
+|------------------|-----------------|--------------|-----------------|
+| `frontier_only`  | Sonnet 5        | Sonnet 5     | high-cost baseline |
+| `sidekick_only`  | Haiku 4.5       | Haiku 4.5    | low-cost baseline |
+| `scout`          | Haiku 4.5 (reads) | Sonnet 5   | **A — read-only Scout** (Sonnet delegates reads) |
+| `inverted`       | Haiku 4.5       | Sonnet 5     | **Inverted** — Haiku plans+locates, Sonnet authors from a brief |
 
-Success = `scout` sits at lower cost than `frontier_only` for comparable quality, and
-clearly above `sidekick_only` on quality.
+Success for `scout` = lower cost than `frontier_only` at comparable quality, clearly above
+`sidekick_only` on quality. `inverted` tests the complementary bet: push the token-heavy
+exploration *and* the fix-planning onto Haiku, so Sonnet only pays to author the edit from a
+compact brief (targeted `read_file` only, no repo-wide search). Toggle any variant with
+`--variants <name>`.
 
 ## Layout
 
@@ -75,7 +79,7 @@ fusion/
   tools.py         tool schemas + dispatcher over a Workspace
   agent.py         generic tool-use loop; one instance = one warm-cache context
   orchestrator.py  solver/scout prompts + Scout delegation wiring
-  policies.py      the three legacy variants (frontier_only / sidekick_only / scout)
+  policies.py      the fusion-loop patterns (frontier_only / sidekick_only / scout / inverted)
 eval/
   tasks.py         native mini-set loader + optional SWE-bench Verified slice
   judge.py         "would you merge?" rubric (0-100 + would_merge)
