@@ -110,5 +110,13 @@ NEXT STEPS (important — the docker group only applies after a re-login):
 
   6) Or the classic falsifying run (frontier_only vs scout):
         ./run_swebench.sh 15 25
+
+NOTE ON PARALLELISM: eval.run_eval is parallel by default (4 agent workers,
+2 Docker score workers) — tuned for a t3.large (2 vCPU / 8 GiB). --score-workers
+is MEMORY-bound: 8 GiB tops out near 2; raise it only with more RAM. On a
+burstable T3 instance, two Docker workers pinning both vCPUs for minutes will
+drain CPU credits (billed as surplus in the default 'unlimited' mode) — for
+sustained scoring prefer a non-burstable box (m5/c5). Pass --sequential to
+eval.run_eval for the old fully-serial behavior.
 ============================================================================
 EOF

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -63,11 +64,16 @@ class Audit:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.jsonl = self.dir / "runs.jsonl"
         self.count = 0
+        # Guards the shared counter + runs.jsonl append when record() is called
+        # from concurrent workers. Per-run <iid>__<variant>.log files are uniquely
+        # named, so only the shared counter and append log need protecting.
+        self._lock = threading.Lock()
 
     def record(self, *, task: dict, variant: str, res, quality, would_merge,
                remaining_before: float) -> str:
         """Write the full per-run log + JSONL row; return a terminal summary."""
-        self.count += 1
+        with self._lock:
+            self.count += 1
         files = _diff_files(res.diff or "")
         test_files = _touched_tests(files)
         art = res.score_artifacts or {}
@@ -141,8 +147,9 @@ class Audit:
             "sidekick_cost_usd": res.ledger.get("sidekick_cost_usd", 0),
             "score_artifacts": art, "log_file": str(log_path),
         }
-        with self.jsonl.open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
+        with self._lock:
+            with self.jsonl.open("a") as fh:
+                fh.write(json.dumps(row) + "\n")
 
         return self._terminal(iid, variant, res, files, test_files, art,
                               quality, remaining_before, log_path)

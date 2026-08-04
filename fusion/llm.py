@@ -87,7 +87,10 @@ class LLMClient:
 
     def __init__(self, ledger: Ledger, max_tokens: int = 8192):
         # Zero-arg client resolves credentials from the environment / ant profile.
-        self._client = anthropic.Anthropic()
+        # Extra retries (SDK default is 2) absorb the 429/overloaded responses that
+        # get more likely once agent runs execute concurrently; the SDK backs off
+        # exponentially and honors Retry-After.
+        self._client = anthropic.Anthropic(max_retries=6)
         self.ledger = ledger
         self.max_tokens = max_tokens
 

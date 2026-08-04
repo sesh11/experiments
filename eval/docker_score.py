@@ -120,40 +120,14 @@ def _detail_from_report(rep: dict, instance_id: str) -> tuple[bool, str]:
     return resolved, f"F2P {frac('FAIL_TO_PASS')}; P2P {frac('PASS_TO_PASS')}"
 
 
-def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
-                split: str = "test", run_id: str, model_name: str,
-                namespace: str | None = "swebench", workers: int = 1,
-                timeout: int = 1800, force_rebuild: bool = False,
-                cwd: Path | None = None, stream: bool = True) -> dict:
-    """Score a single agent patch in the official pinned Docker env.
+def _empty_result() -> dict:
+    return {"resolved": False, "detail": "empty patch (agent produced no diff)",
+            "applied": False, "report": {}, "harness_tail": ""}
 
-    Returns a dict: resolved(bool), detail(str), applied(bool), report(dict),
-    harness_tail(str). An empty patch short-circuits to unresolved (the agent
-    changed nothing) without invoking Docker."""
-    cwd = cwd or Path.cwd()
-    patch = (model_patch or "").strip()
-    if not patch or patch == "(no changes)":
-        return {"resolved": False, "detail": "empty patch (agent produced no diff)",
-                "applied": False, "report": {}, "harness_tail": ""}
 
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
-                                     dir=str(cwd)) as fh:
-        json.dump({KEY_INSTANCE_ID: instance_id, KEY_MODEL: model_name,
-                   KEY_PREDICTION: model_patch}, fh)
-        fh.write("\n")
-        preds = fh.name
-
-    try:
-        proc = _run_harness(predictions_path=preds, instance_ids=[instance_id],
-                            run_id=run_id, dataset_name=dataset_name, split=split,
-                            namespace=namespace, workers=workers, timeout=timeout,
-                            force_rebuild=force_rebuild, cwd=cwd, stream=stream)
-    finally:
-        Path(preds).unlink(missing_ok=True)
-
-    tail = (proc.stdout or "")[-1500:] + (("\n" + proc.stderr[-800:]) if proc.stderr else "")
-    if stream and not tail:
-        tail = "(harness output was streamed live above)"
+def _read_report(cwd: Path, run_id: str, model_name: str, instance_id: str,
+                 tail: str) -> dict:
+    """Read one instance's report.json into the score dict shape."""
     rep_file = cwd / _report_path(run_id, model_name, instance_id)
     if not rep_file.exists():
         return {"resolved": False,
@@ -168,6 +142,73 @@ def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
     applied = bool(rep.get(instance_id, {}).get("patch_successfully_applied", True))
     return {"resolved": resolved, "detail": detail, "applied": applied,
             "report": rep.get(instance_id, {}), "harness_tail": tail}
+
+
+def score_batch(items: list[tuple[str, str]], *, dataset_name: str,
+                split: str = "test", run_id: str, model_name: str,
+                namespace: str | None = "swebench", workers: int = 2,
+                timeout: int = 1800, force_rebuild: bool = False,
+                cwd: Path | None = None, stream: bool = True) -> dict:
+    """Score MANY agent patches for one variant in a single harness invocation.
+
+    `items` is a list of (instance_id, model_patch). All entries share one
+    `model_name` (the variant), so instance_ids are unique within the call and
+    the harness parallelizes across them at `workers`. Empty patches short-circuit
+    to unresolved without touching Docker (same as `score_patch`).
+
+    Returns {instance_id: score_dict}, each dict shaped exactly like
+    `score_patch`'s return so the driver can consume either interchangeably."""
+    cwd = cwd or Path.cwd()
+    results: dict[str, dict] = {}
+    preds: list[dict] = []
+    for iid, patch in items:
+        p = (patch or "").strip()
+        if not p or p == "(no changes)":
+            results[iid] = _empty_result()
+        else:
+            preds.append({KEY_INSTANCE_ID: iid, KEY_MODEL: model_name,
+                          KEY_PREDICTION: patch})
+    if not preds:
+        return results
+
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
+                                     dir=str(cwd)) as fh:
+        for pr in preds:
+            fh.write(json.dumps(pr) + "\n")
+        preds_path = fh.name
+
+    ids = [pr[KEY_INSTANCE_ID] for pr in preds]
+    try:
+        proc = _run_harness(predictions_path=preds_path, instance_ids=ids,
+                            run_id=run_id, dataset_name=dataset_name, split=split,
+                            namespace=namespace, workers=workers, timeout=timeout,
+                            force_rebuild=force_rebuild, cwd=cwd, stream=stream)
+    finally:
+        Path(preds_path).unlink(missing_ok=True)
+
+    tail = (proc.stdout or "")[-1500:] + (("\n" + proc.stderr[-800:]) if proc.stderr else "")
+    if stream and not tail:
+        tail = "(harness output was streamed live above)"
+    for iid in ids:
+        results[iid] = _read_report(cwd, run_id, model_name, iid, tail)
+    return results
+
+
+def score_patch(instance_id: str, model_patch: str, *, dataset_name: str,
+                split: str = "test", run_id: str, model_name: str,
+                namespace: str | None = "swebench", workers: int = 1,
+                timeout: int = 1800, force_rebuild: bool = False,
+                cwd: Path | None = None, stream: bool = True) -> dict:
+    """Score a single agent patch in the official pinned Docker env.
+
+    Thin wrapper over `score_batch` (the one-instance case) so the sequential
+    path and the batched path share identical report-reading logic. Returns a
+    dict: resolved(bool), detail(str), applied(bool), report(dict), harness_tail(str)."""
+    res = score_batch([(instance_id, model_patch)], dataset_name=dataset_name,
+                      split=split, run_id=run_id, model_name=model_name,
+                      namespace=namespace, workers=workers, timeout=timeout,
+                      force_rebuild=force_rebuild, cwd=cwd, stream=stream)
+    return res[instance_id]
 
 
 def gold_selftest(instance_ids: list[str], *, dataset_name: str, split: str = "test",

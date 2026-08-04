@@ -81,6 +81,10 @@ echo "############################################################"
 # Pinned to the gold-verified set from phase 1, scored in Docker. Because those
 # instances' own gold patches resolve, every 'unresolved' below is the agent's
 # doing — read the 'why:' line + per-run log.
+#
+# Runs parallel by default (t3.large tuning: 4 agent workers, 2 Docker score
+# workers). --score-workers is MEMORY-bound: keep ~2 on 8 GiB. Pass --sequential
+# to reproduce the old fully-serial run.
 python -m eval.run_eval --source swebench --backend docker \
   --instance-ids-file "$VERIFIED_FILE" \
   --budget "$BUDGET" --per-task 2.5 --max-steps 30 --variants frontier_only scout

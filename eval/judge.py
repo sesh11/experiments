@@ -37,7 +37,8 @@ _SCHEMA = {
 
 def judge_merge(task: dict, diff: str, tests_pass: bool) -> dict:
     """Returns {score, would_merge, rationale, cost_usd}."""
-    client = anthropic.Anthropic()
+    # Extra retries (SDK default 2) absorb 429/overloaded under concurrent judging.
+    client = anthropic.Anthropic(max_retries=6)
     if len(diff) > 40000:  # cap judge input on huge real-repo diffs
         diff = diff[:40000] + "\n... (diff truncated for review) ..."
     user = (

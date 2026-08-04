@@ -54,6 +54,10 @@ pip install --quiet -r requirements.txt pytest
 
 echo "==> Falsifying run: ${LIMIT} instances, \$${BUDGET} cap, variants: frontier_only scout"
 echo "    (env build + validation gate happens first; skipped instances are printed with reasons)"
+# Parallel by default, tuned for a t3.large (2 vCPU / 8 GiB): agent runs go 4-wide
+# (IO-bound on the API), Docker scoring 2-wide (--score-workers is MEMORY-bound —
+# 8 GiB tops out near 2; raise it only on a box with more RAM). Add --sequential
+# for the old fully-serial behavior, or tune with --agent-workers/--score-workers.
 # Scored authoritatively in Docker (official SWE-bench harness, pinned images).
 # per-task 2.5 / 30 steps: at 1.5/20 many runs hit the cap mid-fix and scored
 # as agent failures. At worst-case spend $25 covers ~5 instances x 2 variants;
