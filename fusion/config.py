@@ -10,12 +10,19 @@ write costs ~1.25x base input and a cache read costs ~0.1x base input.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 # --- Model identifiers ------------------------------------------------------
 MODEL_MAIN = "claude-sonnet-5"          # the "frontier" main agent
 MODEL_SIDEKICK = "claude-haiku-4-5"     # the cheap sidekick / scout
 JUDGE_MODEL = MODEL_MAIN                 # "would you merge this?" rubric grader
+
+# Model run via the OpenRouter gateway (LiteLLM addresses it as
+# "openrouter/<id>"). Defaults to Sonnet 5 *through OpenRouter* so the
+# baseline-openrouter variant is an apples-to-apples parity check against the
+# Anthropic baselines; override to point at any OpenRouter model id.
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-5")
 
 
 # --- Pricing ($ per 1M tokens) ---------------------------------------------
@@ -33,10 +40,31 @@ PRICING: dict[str, Price] = {
 }
 
 
+# Conservative fallback rate for models not in PRICING (e.g. an arbitrary
+# OpenRouter id). Priced at the frontier Sonnet rate so the budget guard
+# over-estimates rather than under-estimates spend on unknown models.
+_FALLBACK_PRICE = PRICING["claude-sonnet-5"]
+_warned_unknown: set[str] = set()
+
+
 def cost_for(model: str, *, input_tokens: int, output_tokens: int,
              cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> float:
-    """Dollar cost of a single call given a token breakdown."""
-    p = PRICING[_normalize(model)]
+    """Dollar cost of a single call given a token breakdown.
+
+    Unknown model ids (arbitrary OpenRouter routes the pinned table doesn't
+    know) fall back to a conservative rate with a one-time warning, so an
+    exploratory run is metered and budget-guarded instead of crashing on a
+    KeyError mid-session.
+    """
+    key = _normalize(model)
+    p = PRICING.get(key)
+    if p is None:
+        if key not in _warned_unknown:
+            _warned_unknown.add(key)
+            print(f"    ! no pinned pricing for '{model}'; billing at the "
+                  f"conservative Sonnet fallback rate (set an entry in "
+                  f"config.PRICING for exact numbers)")
+        p = _FALLBACK_PRICE
     return (
         input_tokens / 1e6 * p.input
         + output_tokens / 1e6 * p.output

@@ -101,6 +101,7 @@ the same pinned pricing, so cost numbers stay comparable.
 | `baseline-fusion`  | in-repo fusion loop                        | parity baseline; same loop as `frontier_only` |
 | `baseline-stirrup` | [Stirrup](https://github.com/ArtificialAnalysis/Stirrup), embedded | `pip install -r requirements.txt` covers it |
 | `baseline-pi`      | [pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent), subprocess | optional: `npm i -g @mariozechner/pi-coding-agent`; `PI_BIN` overrides discovery. Skipped with an error row if absent. |
+| `baseline-openrouter` | Stirrup's litellm loop via [OpenRouter](https://openrouter.ai) | needs `OPENROUTER_API_KEY`; `OPENROUTER_MODEL` selects the model (default: Sonnet 5 through OpenRouter). Skipped with an error row if the key is absent. |
 
 ```bash
 # Parity check: same tasks, same model, three harnesses
@@ -129,6 +130,10 @@ export ANTHROPIC_API_KEY=sk-ant-...     # REQUIRED for any run that calls the AP
 
 # optional, only for the baseline-pi variant:
 npm i -g @mariozechner/pi-coding-agent
+
+# optional, only for the baseline-openrouter variant:
+export OPENROUTER_API_KEY=sk-or-...      # https://openrouter.ai/keys
+export OPENROUTER_MODEL=anthropic/claude-sonnet-5   # any OpenRouter model slug
 ```
 
 > **Prerequisite:** the eval run needs an API key. Building/inspecting the harness and

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fusion import config
@@ -98,6 +99,10 @@ class StirrupRuntime:
     """Adapter over Stirrup's agent loop with code_exec in the task workspace."""
 
     name = "stirrup"
+    # LiteLLM provider prefix. Subclasses (e.g. OpenRouterRuntime) swap this to
+    # route the same loop through a different gateway; the bare model id is kept
+    # for pricing lookups, which are provider-agnostic.
+    provider = "anthropic"
 
     def preflight(self) -> tuple[bool, str]:
         if _IMPORT_ERROR is not None:
@@ -108,9 +113,11 @@ class StirrupRuntime:
             ledger: Ledger, cfg: config.RunConfig) -> RuntimeResult:
         if _IMPORT_ERROR is not None:
             raise RuntimeUnavailable(str(_IMPORT_ERROR))
-        role = "main" if model == config.MODEL_MAIN else "sidekick"
+        # Normalize so a provider-prefixed id (e.g. "anthropic/claude-sonnet-5"
+        # routed via OpenRouter) still attributes to the "main" role.
+        role = "main" if config._normalize(model) == config.MODEL_MAIN else "sidekick"
         client = LedgerLiteLLMClient(
-            model=f"anthropic/{model}", ledger=ledger, role=role,
+            model=f"{self.provider}/{model}", ledger=ledger, role=role,
             pricing_model=model,
         )
         return asyncio.run(self._arun(task, ws, client, cfg))
@@ -141,6 +148,26 @@ class StirrupRuntime:
             trace=_trace_from_history(history),
             extra={"stirrup_run_metadata_keys": sorted(run_metadata)},
         )
+
+
+class OpenRouterRuntime(StirrupRuntime):
+    """Stirrup's LiteLLM loop routed through the OpenRouter gateway.
+
+    LiteLLM addresses OpenRouter models as ``openrouter/<id>`` and reads the
+    key from ``OPENROUTER_API_KEY`` in the environment, so this is the exact
+    Stirrup path with a different provider prefix — no separate integration.
+    """
+
+    name = "openrouter"
+    provider = "openrouter"
+
+    def preflight(self) -> tuple[bool, str]:
+        ok, reason = super().preflight()
+        if not ok:
+            return ok, reason
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            return False, "set OPENROUTER_API_KEY (get one at openrouter.ai/keys)"
+        return True, "openrouter via stirrup/litellm"
 
 
 def _trace_from_history(history: list) -> list[dict]:

@@ -139,6 +139,11 @@ def _pi_runtime() -> AgentRuntime:
     return PiRuntime()
 
 
+def _openrouter_runtime() -> AgentRuntime:
+    from runtimes.stirrup_rt import OpenRouterRuntime
+    return OpenRouterRuntime()
+
+
 @dataclass(frozen=True)
 class VariantSpec:
     """One experiment cell: pattern + runtime + model(s).
@@ -156,6 +161,10 @@ _REGISTRY: dict[str, VariantSpec] = {
     "baseline-fusion": VariantSpec(_fusion_runtime, config.MODEL_MAIN),
     "baseline-stirrup": VariantSpec(_stirrup_runtime, config.MODEL_MAIN),
     "baseline-pi": VariantSpec(_pi_runtime, config.MODEL_MAIN),
+    # Same LiteLLM loop as baseline-stirrup, routed through OpenRouter. The
+    # model is env-configurable via OPENROUTER_MODEL (default: Sonnet 5 through
+    # OpenRouter) for an apples-to-apples parity check.
+    "baseline-openrouter": VariantSpec(_openrouter_runtime, config.OPENROUTER_MODEL),
 }
 
 _LEGACY = ("frontier_only", "sidekick_only", "scout")
