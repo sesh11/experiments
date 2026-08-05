@@ -39,11 +39,25 @@ fi
 LIMIT="${1:-${LIMIT:-15}}"
 BUDGET="${2:-${BUDGET:-25}}"
 
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: no ANTHROPIC_API_KEY. Copy .env.example to .env and add your key," >&2
-  echo "       or run: export ANTHROPIC_API_KEY=sk-ant-..." >&2
-  exit 1
-fi
+PROVIDER="${LLM_PROVIDER:-anthropic}"
+case "$PROVIDER" in
+  anthropic)
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+      echo "ERROR: LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing." >&2
+      exit 1
+    fi
+    ;;
+  openrouter)
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+      echo "ERROR: LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is missing." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "ERROR: unsupported LLM_PROVIDER='$PROVIDER' (anthropic or openrouter)." >&2
+    exit 1
+    ;;
+esac
 
 echo "==> Setting up harness virtualenv (.venv)"
 python3 -m venv .venv
@@ -53,6 +67,7 @@ pip install --quiet -U pip
 pip install --quiet -r requirements.txt pytest
 
 echo "==> Falsifying run: ${LIMIT} instances, \$${BUDGET} cap, variants: frontier_only scout"
+echo "    Provider: ${PROVIDER}; main=${MODEL_MAIN:-claude-sonnet-5}; sidekick=${MODEL_SIDEKICK:-claude-haiku-4-5}"
 echo "    (env build + validation gate happens first; skipped instances are printed with reasons)"
 # Scored authoritatively in Docker (official SWE-bench harness, pinned images).
 # per-task 2.5 / 30 steps: at 1.5/20 many runs hit the cap mid-fix and scored

@@ -13,7 +13,7 @@
 # Usage (on the EC2 instance, from the repo root):
 #   sudo bash scripts/ec2_bootstrap.sh
 #   # then LOG OUT and back in (so the docker group applies), and:
-#   cp .env.example .env && nano .env      # paste your ANTHROPIC_API_KEY
+#   cp .env.example .env && nano .env      # choose provider and paste its key
 #   ./confirm_scoring.sh 3 0               # $0 gold check — expect 3/3
 #
 set -euo pipefail
@@ -95,7 +95,7 @@ NEXT STEPS (important — the docker group only applies after a re-login):
   3) Add your API key:
         cd $REPO_ROOT
         cp .env.example .env
-        nano .env          # paste ANTHROPIC_API_KEY=sk-ant-...
+        nano .env          # choose Anthropic or OpenRouter and paste its key
 
   4) FREE checks (no LLM spend):
         source .venv/bin/activate

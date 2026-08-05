@@ -27,9 +27,9 @@ class FusionRuntime:
 
     def run(self, task: dict, ws: Workspace, *, model: str,
             ledger: Ledger, cfg: config.RunConfig) -> RuntimeResult:
-        client = LLMClient(ledger, max_tokens=cfg.max_tokens)
+        client = LLMClient.for_run(ledger, cfg)
         tools = WorkspaceTools(ws)
-        role = "main" if model == config.MODEL_MAIN else "sidekick"
+        role = "main" if model == cfg.main_model else "sidekick"
         thinking = cfg.main_thinking if role == "main" else cfg.sidekick_thinking
         agent = Agent(
             role=role, model=model, system=SOLVER_SYSTEM,

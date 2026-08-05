@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -49,13 +51,31 @@ def _make_scorer(args):
     return score
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="native", choices=["native", "swebench"])
     ap.add_argument("--limit", type=int, default=None, help="max tasks")
     ap.add_argument("--variants", nargs="+", default=variants.ALL_VARIANTS)
     ap.add_argument("--budget", type=float, default=25.0, help="global $ cap")
     ap.add_argument("--per-task", type=float, default=3.0, help="$ cap per variant/task")
+    ap.add_argument("--provider", default=config.DEFAULT_PROVIDER,
+                    choices=config.PROVIDERS,
+                    help="provider for main and sidekick model calls")
+    ap.add_argument("--main-model", default=config.MODEL_MAIN,
+                    help="main model id (OpenRouter ids normally include provider prefix)")
+    ap.add_argument("--sidekick-model", default=config.MODEL_SIDEKICK,
+                    help="sidekick/scout model id")
+    ap.add_argument("--judge-provider", default=os.environ.get("JUDGE_PROVIDER"),
+                    choices=config.PROVIDERS,
+                    help="provider for the quality judge (independent of --provider)")
+    ap.add_argument("--judge-model", default=os.environ.get("JUDGE_MODEL"),
+                    help="quality judge model id")
+    ap.add_argument("--openrouter-base-url", default=config.OPENROUTER_BASE_URL,
+                    help="OpenRouter-compatible API base URL")
+    ap.add_argument("--openrouter-site-url", default=config.OPENROUTER_SITE_URL,
+                    help="optional HTTP-Referer app attribution URL")
+    ap.add_argument("--openrouter-app-name", default=config.OPENROUTER_APP_NAME,
+                    help="optional X-OpenRouter-Title app attribution name")
     ap.add_argument("--no-judge", action="store_true", help="skip the quality judge")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="agent tool-loop steps per task (default 14; use ~20 on real repos)")
@@ -66,7 +86,38 @@ def main() -> None:
     ap.add_argument("--instance-ids-file", default=None,
                     help="run exactly the instance ids in this file (one per line). "
                          "The confirm flow points this at the gold-verified set.")
+    return ap
+
+
+def _config_from_args(args: argparse.Namespace) -> config.RunConfig:
+    return config.RunConfig(
+        provider=args.provider,
+        main_model=args.main_model,
+        sidekick_model=args.sidekick_model,
+        judge_provider=args.judge_provider or args.provider,
+        judge_model=args.judge_model or args.main_model,
+        openrouter_base_url=args.openrouter_base_url,
+        openrouter_site_url=args.openrouter_site_url,
+        openrouter_app_name=args.openrouter_app_name,
+        budget_usd=args.per_task,
+        per_task_usd=args.per_task,
+        max_steps=args.max_steps or config.RunConfig.max_steps,
+    )
+
+
+def main() -> None:
+    ap = build_parser()
     args = ap.parse_args()
+    try:
+        base_cfg = _config_from_args(args)
+    except config.ConfigurationError as exc:
+        ap.error(str(exc))
+    uses_openrouter = (
+        base_cfg.provider == "openrouter"
+        or (not args.no_judge and base_cfg.judge_provider == "openrouter")
+    )
+    if uses_openrouter and not os.environ.get("OPENROUTER_API_KEY", "").strip():
+        ap.error("OPENROUTER_API_KEY is required for the selected provider/judge")
 
     instance_ids = None
     if args.instance_ids_file:
@@ -84,6 +135,9 @@ def main() -> None:
     log = audit.Audit(_OUT)
     print(f"Loaded {len(task_list)} task(s) from '{args.source}'. "
           f"Variants: {args.variants}. Budget: ${args.budget:.2f}")
+    print(f"Models: {base_cfg.provider}:{base_cfg.main_model} (main), "
+          f"{base_cfg.provider}:{base_cfg.sidekick_model} (sidekick), "
+          f"{base_cfg.judge_provider}:{base_cfg.judge_model} (judge)")
     print(f"Per-run audit logs: {log.dir}/")
 
     rows: list[dict] = []
@@ -100,12 +154,11 @@ def main() -> None:
                 stop = True
                 break
 
-            cfg = config.RunConfig(
+            cfg = replace(
+                base_cfg,
                 budget_usd=max(0.02, min(remaining, args.per_task)),
                 per_task_usd=args.per_task,
             )
-            if args.max_steps:
-                cfg.max_steps = args.max_steps
             res = variants.run_variant(variant, task, cfg)
             run_cost = res.ledger.get("total_cost_usd", 0.0)
             spent += run_cost
@@ -126,7 +179,7 @@ def main() -> None:
             quality = None
             merge = None
             if not args.no_judge and (args.budget - spent) > 0.02:
-                j = judge.judge_merge(task, res.diff, res.resolved)
+                j = judge.judge_merge(task, res.diff, res.resolved, cfg)
                 quality, merge = j["score"], j["would_merge"]
                 spent += j.get("cost_usd", 0.0)
 

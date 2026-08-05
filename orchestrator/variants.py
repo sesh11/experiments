@@ -147,15 +147,15 @@ class VariantSpec:
     confidence-gated routing plug in after the parity milestone.
     """
     runtime_factory: Callable[[], AgentRuntime]
-    main_model: str
+    model_role: str = "main"
     sidekick_model: str | None = None
     pattern: str = "single_agent"
 
 
 _REGISTRY: dict[str, VariantSpec] = {
-    "baseline-fusion": VariantSpec(_fusion_runtime, config.MODEL_MAIN),
-    "baseline-stirrup": VariantSpec(_stirrup_runtime, config.MODEL_MAIN),
-    "baseline-pi": VariantSpec(_pi_runtime, config.MODEL_MAIN),
+    "baseline-fusion": VariantSpec(_fusion_runtime),
+    "baseline-stirrup": VariantSpec(_stirrup_runtime),
+    "baseline-pi": VariantSpec(_pi_runtime),
 }
 
 _LEGACY = ("frontier_only", "sidekick_only", "scout")
@@ -178,5 +178,5 @@ def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
         return PolicyResult(variant=name, resolved=False, diff="", summary="",
                             ledger=Ledger(cap_usd=cfg.budget_usd).summary(),
                             error=f"runtime unavailable: {exc}")
-    return single_agent(task, cfg, variant=name, runtime=runtime,
-                        model=spec.main_model)
+    model = cfg.main_model if spec.model_role == "main" else cfg.sidekick_model
+    return single_agent(task, cfg, variant=name, runtime=runtime, model=model)

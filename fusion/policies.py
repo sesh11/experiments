@@ -21,14 +21,15 @@ from .tools import (FINISH_TOOL, READ_TOOLS, SCOUT_TOOL, WRITE_TOOLS,
 
 
 def _run_single_agent(task: dict, cfg: config.RunConfig, *, variant: str,
-                      model: str, thinking: dict | None) -> PolicyResult:
+                      role: str, model: str,
+                      thinking: dict | None) -> PolicyResult:
     """frontier_only / sidekick_only: one agent, full read+write toolset."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
     ws = make_ws(task)
-    client = LLMClient(ledger, max_tokens=cfg.max_tokens)
+    client = LLMClient.for_run(ledger, cfg)
     tools = WorkspaceTools(ws)
     agent = Agent(
-        role=("main" if model == config.MODEL_MAIN else "sidekick"),
+        role=role,
         model=model, system=orchestrator.SOLVER_SYSTEM,
         tools=READ_TOOLS + WRITE_TOOLS + [FINISH_TOOL],
         client=client, thinking=thinking, max_steps=cfg.max_steps,
@@ -40,7 +41,7 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
     """scout (A): Sonnet main whose reads are delegated to a Haiku Scout."""
     ledger = Ledger(cap_usd=cfg.budget_usd)
     ws = make_ws(task)
-    client = LLMClient(ledger, max_tokens=cfg.max_tokens)
+    client = LLMClient.for_run(ledger, cfg)
     tools = WorkspaceTools(ws)
     scout_trace: list = []
 
@@ -50,7 +51,7 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
                 m, sub_trace = orchestrator.make_scout_map(
                     inp["question"], ws, client,
                     max_steps=cfg.scout_max_steps,
-                    sidekick_model=config.MODEL_SIDEKICK,
+                    sidekick_model=cfg.sidekick_model,
                     thinking=cfg.sidekick_thinking,
                 )
                 scout_trace.extend(sub_trace)
@@ -63,7 +64,7 @@ def _run_scout(task: dict, cfg: config.RunConfig) -> PolicyResult:
 
     # Main gets scout + write tools, but NOT raw read tools: exploration is delegated.
     agent = Agent(
-        role="main", model=config.MODEL_MAIN, system=orchestrator.SOLVER_SYSTEM,
+        role="main", model=cfg.main_model, system=orchestrator.SOLVER_SYSTEM,
         tools=[SCOUT_TOOL] + WRITE_TOOLS + [FINISH_TOOL],
         client=client, thinking=cfg.main_thinking, max_steps=cfg.max_steps,
     )
@@ -95,11 +96,13 @@ def _finalize(variant, task, ws, ledger, agent, execute,
 # --- registry ---------------------------------------------------------------
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     if name == "frontier_only":
-        return _run_single_agent(task, cfg, variant=name,
-                                  model=config.MODEL_MAIN, thinking=cfg.main_thinking)
+        return _run_single_agent(
+            task, cfg, variant=name, role="main",
+            model=cfg.main_model, thinking=cfg.main_thinking)
     if name == "sidekick_only":
-        return _run_single_agent(task, cfg, variant=name,
-                                  model=config.MODEL_SIDEKICK, thinking=cfg.sidekick_thinking)
+        return _run_single_agent(
+            task, cfg, variant=name, role="sidekick",
+            model=cfg.sidekick_model, thinking=cfg.sidekick_thinking)
     if name == "scout":
         return _run_scout(task, cfg)
     raise ValueError(f"unknown variant: {name}")
