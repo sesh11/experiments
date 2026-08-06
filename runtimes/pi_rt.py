@@ -65,8 +65,9 @@ class PiRuntime:
         pi_bin = _find_pi()
         if pi_bin is None:
             raise RuntimeUnavailable(_INSTALL_HINT)
+        routed_model = config.api_model(cfg.provider, model)
         cmd = [
-            pi_bin, "--provider", "anthropic", "--model", model,
+            pi_bin, "--provider", cfg.provider, "--model", routed_model,
             "--thinking", "off", "--mode", "json", "--print",
             "--no-session", "--no-extensions", "--no-skills",
             "--no-prompt-templates", "--no-themes", "--no-context-files",
@@ -91,14 +92,18 @@ class PiRuntime:
 
         events = _parse_events(stdout)
         totals, pi_cost, steps, last_text, last_stop, api_error = _digest(events)
-        role = "main" if model == config.MODEL_MAIN else "sidekick"
+        role = "main" if model == cfg.main_model else "sidekick"
         # Post-hoc accounting: one record for the whole session, cost from
         # pinned pricing. May raise BudgetExceeded (caught by the orchestrator).
         ledger.record_tokens(
-            role, model,
+            role, routed_model,
             input_tokens=totals["input"], output_tokens=totals["output"],
             cache_write_tokens=totals["cacheWrite"],
             cache_read_tokens=totals["cacheRead"],
+            cost_usd=(
+                None if config.has_pinned_price(routed_model)
+                else (pi_cost if pi_cost > 0 else None)
+            ),
         )
         recomputed = ledger.by_role[role].cost_usd
         extra = {
@@ -108,7 +113,7 @@ class PiRuntime:
         if pi_cost and abs(pi_cost - recomputed) / max(recomputed, 1e-9) > 0.10:
             print(f"    ! pi self-reported cost ${pi_cost:.4f} deviates >10% "
                   f"from pinned-pricing recompute ${recomputed:.4f} "
-                  f"(pi's registry may not know '{model}')")
+                  f"(pi's registry may not know '{routed_model}')")
         if timed_out:
             raise TimeoutError(
                 f"pi hit the {cfg.runtime_timeout_s}s wall-clock cap "
