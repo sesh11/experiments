@@ -1,6 +1,7 @@
 anthropic>=0.40.0
 datasets>=2.14.0
 matplotlib>=3.7.0
+pytest>=8.0.0
 # Official SWE-bench harness — authoritative Docker scoring (--backend docker).
 swebench>=4.0.0
 # Stirrup agent runtime (baseline-stirrup variant). fastapi/orjson are litellm
