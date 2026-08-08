@@ -349,6 +349,7 @@ def _execute(args, store: RunStore, task_list: list[dict],
         "docker_workers": int(resources["docker_workers"]),
         "completed_now": summary.completed_now,
         "interrupted": summary.interrupted,
+        "fatal_error": summary.fatal_error,
         **summary.telemetry,
     }
     store.manifest["resources"].setdefault("execution_history", []).append(invocation)
@@ -358,8 +359,10 @@ def _execute(args, store: RunStore, task_list: list[dict],
     _persist_aggregates(store, audit_log)
     rows = [payload["row"] for payload in store.completed_payloads()]
     _print_tally(rows)
+    outcome = "Failed" if summary.fatal_error else (
+        "Interrupted" if summary.interrupted else "Done")
     print(
-        f"\n=== {'Interrupted' if summary.interrupted else 'Done'}. "
+        f"\n=== {outcome}. "
         f"{len(rows)} completed cell(s), total spend ${summary.spent_usd:.2f}. ===\n"
         f"    Resume:    python -m eval.run_eval --resume {store.manifest['run_id']}\n"
         f"    Summary:   {store.run_dir}/summary.json + summary.csv\n"
@@ -380,6 +383,11 @@ def _execute(args, store: RunStore, task_list: list[dict],
         f"throughput {summary.telemetry['completed_cells_per_hour']:.1f} cells/hour",
         flush=True,
     )
+    if summary.fatal_error:
+        raise RuntimeError(
+            "systemic provider failure; no further cells were dispatched. "
+            f"Fix the provider configuration and resume with: "
+            f"python -m eval.run_eval --resume {store.manifest['run_id']}")
 
 
 def main() -> None:

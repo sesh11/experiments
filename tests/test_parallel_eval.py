@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import subprocess
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 import concurrent.futures
@@ -14,7 +16,7 @@ import pytest
 
 from eval import audit
 from eval.isolation import isolated_task
-from eval.parallel import run_cells
+from eval.parallel import _systemic_provider_error, run_cells
 from eval.run_eval import (_load_configurations, _persist_aggregates,
                            _validate_resume_args)
 from eval.resources import GIB, ResourceSnapshot, choose_workers
@@ -25,8 +27,9 @@ from fusion.llm import BudgetExceeded, LLMClient, Ledger
 from orchestrator.variants import PolicyResult
 from runtimes.pi_rt import PiRuntime
 from fusion.workspace import Workspace
-from scripts.benchmark_parallel import (_bottleneck, _resource_report,
-                                        _verify_scoring_parity)
+from scripts import benchmark_parallel
+from scripts.benchmark_parallel import (_bottleneck, _preflight_anthropic,
+                                        _resource_report, _verify_scoring_parity)
 
 
 RUN_CONFIG = {
@@ -335,6 +338,74 @@ def test_phase_timing_is_live_and_aggregated(tmp_path):
     assert format_duration(0.25) == "0.25s"
     assert format_duration(65) == "01:05"
     assert format_duration(3661) == "1:01:01"
+
+
+def test_systemic_provider_failure_stops_dispatch_and_stays_resumable(tmp_path):
+    tasks = _tasks(4)
+    store, log, cells = _store(tmp_path, tasks)
+
+    def auth_failure(variant, task, cfg):
+        result = _result(variant, cost=0.0, resolved=False)
+        result.error = "AuthenticationError: invalid x-api-key"
+        return result
+
+    with patch("eval.parallel.variants.run_variant", side_effect=auth_failure):
+        summary = run_cells(
+            store=store, tasks=tasks, workers=4, docker_workers=2,
+            budget_usd=10, per_task_usd=1, no_judge=True,
+            audit_log=log, on_persist=lambda: None, progress_interval=0,
+        )
+
+    assert summary.interrupted
+    assert "AuthenticationError" in summary.fatal_error
+    assert summary.completed_now == 0
+    assert summary.spent_usd == 0
+    assert summary.counts == {"pending": 4}
+    assert all(store.manifest["cells"][cell.cell_id]["attempt_history"]
+               for cell in cells)
+    progress = json.loads((store.run_dir / "progress.json").read_text())
+    assert progress["status"] == "failed"
+    assert progress["budget"]["reserved_usd"] == 0
+    assert _systemic_provider_error("RateLimitError: retry exhausted")
+    assert not _systemic_provider_error("RuntimeError: one task failed")
+
+
+def test_benchmark_direct_script_adds_repo_root_to_import_path(tmp_path):
+    script = Path(benchmark_parallel.__file__).resolve()
+    command = (
+        "import runpy; "
+        f"runpy.run_path({str(script)!r}, run_name='benchmark_import_test'); "
+        "import eval; print(eval.__file__)"
+    )
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    proc = subprocess.run(
+        [sys.executable, "-c", command], cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert "eval" in proc.stdout
+
+
+def test_benchmark_anthropic_preflight_rejects_placeholder_and_401(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-your-key-here")
+    with pytest.raises(SystemExit, match="missing or still a placeholder"):
+        _preflight_anthropic()
+
+    import anthropic
+    import httpx
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-invalid")
+    response = httpx.Response(
+        401, request=httpx.Request("GET", "https://api.anthropic.com/v1/models"))
+    error = anthropic.AuthenticationError(
+        "invalid key", response=response,
+        body={"error": {"message": "invalid x-api-key"}})
+    def reject(**kwargs):
+        raise error
+
+    client = SimpleNamespace(models=SimpleNamespace(list=reject))
+    with patch("anthropic.Anthropic", return_value=client):
+        with pytest.raises(SystemExit, match="rejected ANTHROPIC_API_KEY"):
+            _preflight_anthropic()
 
 
 def test_global_budget_reservations_prevent_overdispatch(tmp_path):

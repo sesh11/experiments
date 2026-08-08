@@ -85,6 +85,7 @@ class ActiveAgent:
 @dataclass
 class RunSummary:
     interrupted: bool
+    fatal_error: str | None
     completed_now: int
     spent_usd: float
     counts: dict[str, int]
@@ -224,6 +225,20 @@ def _join_error(first: str, second: str) -> str:
     return f"{first}; {second}" if first else second
 
 
+def _systemic_provider_error(error: str) -> bool:
+    """Return whether retrying other cells with the same provider must fail."""
+    lowered = (error or "").lower()
+    markers = (
+        "authenticationerror:",
+        "permissiondeniederror:",
+        "ratelimiterror:",
+        "apiconnectionerror:",
+        "apitimeouterror:",
+        "invalid x-api-key",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def result_row(final: FinalOutput) -> dict:
     cell = final.agent.cell
     res = final.agent.result
@@ -308,6 +323,9 @@ class _Reservations:
                 f"cell spent ${actual:.4f}, exceeding its ${reserved:.4f} reservation")
         self.spent += actual
 
+    def release(self, cell_id: str) -> None:
+        self.active.pop(cell_id, None)
+
 
 def run_cells(*, store: RunStore, tasks: list[dict], workers: int,
               docker_workers: int, budget_usd: float, per_task_usd: float,
@@ -321,6 +339,7 @@ def run_cells(*, store: RunStore, tasks: list[dict], workers: int,
     score_futures: dict[Future, AgentOutput] = {}
     ready_to_score: deque[AgentOutput] = deque()
     interrupted = False
+    fatal_error: str | None = None
     completed_now = 0
     pressure_note = ""
     serial_mode = workers == 1 and docker_workers == 1
@@ -544,6 +563,21 @@ def run_cells(*, store: RunStore, tasks: list[dict], workers: int,
                             0.0, finished - active.dispatched_monotonic),
                     )
                 agent_work_seconds += agent.agent_wall_seconds
+                if _systemic_provider_error(agent.result.error):
+                    reservations.release(spec.cell_id)
+                    store.mark_pending(spec.cell_id)
+                    interrupted = True
+                    if fatal_error is None:
+                        fatal_error = agent.result.error
+                        print(
+                            "\n!! Systemic provider failure detected; stopping new "
+                            "dispatch and returning affected cells to pending. Fix "
+                            "credentials/connectivity, then resume this run.\n"
+                            f"   {fatal_error}",
+                            flush=True,
+                        )
+                    made_progress = True
+                    continue
                 ready_to_score.append(agent)
                 store.mark_scoring(
                     spec.cell_id, agent_finished_at=agent.agent_finished_at,
@@ -699,7 +733,10 @@ def run_cells(*, store: RunStore, tasks: list[dict], workers: int,
             completed_now * 3600 / wall_seconds, 3)
         if wall_seconds and completed_now else 0.0,
     }
-    write_progress(status="interrupted" if interrupted else "completed")
-    return RunSummary(interrupted=interrupted, completed_now=completed_now,
+    progress_status = "failed" if fatal_error else (
+        "interrupted" if interrupted else "completed")
+    write_progress(status=progress_status)
+    return RunSummary(interrupted=interrupted, fatal_error=fatal_error,
+                      completed_now=completed_now,
                       spent_usd=store.spent_usd, counts=store.summary_counts(),
                       telemetry=telemetry)

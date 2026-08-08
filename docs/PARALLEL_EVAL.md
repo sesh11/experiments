@@ -198,6 +198,24 @@ python scripts/benchmark_parallel.py \
   --variants frontier_only scout --budget 25
 ```
 
+The benchmark script can be invoked directly from any directory. It loads
+unset variables from the repository `.env`, then validates
+`ANTHROPIC_API_KEY` with a free Models API request before preparing tasks or
+starting either paid arm. A missing, placeholder, or rejected key stops the
+benchmark immediately with a corrective message. Environment variables take
+precedence over `.env`; if an old key is already exported, reload the file:
+
+```bash
+unset ANTHROPIC_API_KEY
+set -a; . ./.env; set +a
+```
+
+The evaluator also recognizes provider-wide authentication, permission, rate
+limit, connection, and timeout failures during execution. It stops new
+dispatch, returns affected cells to `pending`, writes `progress.json` with
+status `failed`, and exits nonzero. After correcting the provider issue, use
+the printed `--resume <run-id>` command instead of losing completed cells.
+
 The same operation is available as the manual GitHub Actions workflow
 `parallel-eval-benchmark`; it first gold-verifies and pins the selected slice,
 then uploads both run directories and the report. Its budget input is **per

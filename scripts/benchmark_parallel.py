@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -17,6 +18,65 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# Direct execution (`python scripts/benchmark_parallel.py`) puts scripts/, not
+# the repository root, on sys.path. Add the root before the parity phase imports
+# the eval package. This also makes invocation from outside the checkout work.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _load_local_env() -> None:
+    """Load simple KEY=VALUE entries from the repository .env when unset."""
+    path = _REPO_ROOT / ".env"
+    if not path.exists():
+        return
+    loaded = []
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+        loaded.append(key)
+    if loaded:
+        print(f"Loaded {', '.join(loaded)} from {_REPO_ROOT / '.env'}", flush=True)
+
+
+def _preflight_anthropic() -> None:
+    """Validate credentials with a free Models API request before paid arms."""
+    import anthropic
+
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if (not key or key in {"sk-ant-...", "sk-ant-your-key-here"}
+            or "your-key" in key.lower()):
+        raise SystemExit(
+            "Anthropic preflight failed: ANTHROPIC_API_KEY is missing or still a "
+            "placeholder. Update .env or export a valid key before benchmarking.")
+    try:
+        # Listing one model validates authentication without generating tokens.
+        client = anthropic.Anthropic(
+            api_key=key, timeout=10.0, max_retries=0)
+        next(iter(client.models.list(limit=1)), None)
+    except anthropic.AuthenticationError:
+        raise SystemExit(
+            "Anthropic preflight failed: the API rejected ANTHROPIC_API_KEY (401). "
+            "Update .env, then run `set -a; . ./.env; set +a` and retry.") from None
+    except anthropic.APIError as exc:
+        raise SystemExit(
+            f"Anthropic preflight failed before any benchmark work: "
+            f"{type(exc).__name__}: {exc}") from None
+    print("Anthropic credential preflight passed (no token-generating call).", flush=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -54,7 +114,7 @@ def _invoke(run_id: str, args, *, workers: str, docker_workers: str) -> tuple[fl
     if not args.with_judge:
         cmd.append("--no-judge")
     started = time.monotonic()
-    proc = subprocess.run(cmd)
+    proc = subprocess.run(cmd, cwd=_REPO_ROOT)
     elapsed = time.monotonic() - started
     if proc.returncode:
         raise SystemExit(f"benchmark arm '{run_id}' failed with exit {proc.returncode}")
@@ -204,6 +264,13 @@ def _verify_scoring_parity(serial_dir: Path, *, stamp: str,
 
 def main() -> None:
     args = _parser().parse_args()
+    # Resolve user-supplied paths before anchoring all run artifacts to the repo.
+    args.instance_ids_file = str(Path(args.instance_ids_file).expanduser().resolve())
+    if args.configs_file:
+        args.configs_file = str(Path(args.configs_file).expanduser().resolve())
+    os.chdir(_REPO_ROOT)
+    _load_local_env()
+    _preflight_anthropic()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     serial_id = f"benchmark_{stamp}_serial"
     parallel_id = f"benchmark_{stamp}_parallel"

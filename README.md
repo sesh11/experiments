@@ -133,6 +133,10 @@ export ANTHROPIC_API_KEY=sk-ant-...     # REQUIRED for any run that calls the AP
 npm i -g @mariozechner/pi-coding-agent
 ```
 
+`scripts/benchmark_parallel.py` loads unset values from `.env` and performs a
+free Anthropic credential preflight before either paid benchmark arm. Provider-
+wide failures during a run stop dispatch and leave affected cells resumable.
+
 > **Prerequisite:** the eval run needs an API key. Building/inspecting the harness and
 > the no-LLM smoke test do not.
 
