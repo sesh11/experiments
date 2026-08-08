@@ -46,6 +46,61 @@ Each invocation also records agent/scoring work-seconds, effective and peak
 concurrency, minimum available RAM/disk, maximum one-minute load, and resource
 pressure pauses under `resources.execution_history`.
 
+## Live timing and performance capture
+
+Elapsed-time heartbeats print every 10 seconds by default:
+
+```text
+⏱ 04:12 elapsed | 4/10 done | agent 4 | scoring 2 | queued 4 | 57.1 cells/hour | ETA 06:18
+```
+
+Change the cadence with `--progress-interval 5`, or pass `0` to silence only
+the periodic console heartbeat. Timing artifacts are still written when cell
+state changes. During a run, inspect the atomic live snapshot from another SSH
+session:
+
+```bash
+watch -n 2 'jq "{status, invocation, cells, active, budget}" results/runs/<run-id>/progress.json'
+```
+
+The run directory contains three complementary views:
+
+- `progress.json`: current overall elapsed time, throughput, ETA, cell counts,
+  active cell elapsed times, and live budget state.
+- `summary.csv` / `summary.json`: raw timing columns for every completed cell,
+  including wall-clock timestamps.
+- `timing_summary.json`: overall and per-variant/configuration count, total,
+  mean, p50, p95, and maximum for every phase.
+
+Per-cell phases are `queue_wait_seconds`, `workspace_setup_seconds`,
+`runtime_wall_seconds`, `workspace_cleanup_seconds`, `agent_wall_seconds`,
+`scoring_queue_wait_seconds`, `docker_lock_wait_seconds`,
+`docker_scoring_wall_seconds`, `judge_wall_seconds`, and
+`cell_elapsed_seconds`. `cell_wall_seconds` remains the compatibility measure
+of active agent plus scoring work; `cell_elapsed_seconds` is the true latency
+from dispatch through completed scoring.
+
+Use the breakdown to tune the right constraint:
+
+- High queue wait with saturated agent workers: increase `--workers` if EC2
+  memory and provider limits allow it.
+- High workspace setup/cleanup: optimize checkout reuse or disk performance.
+- High runtime time: compare harness/model/configuration choices; more workers
+  improve throughput but do not shorten one cell.
+- High scoring queue wait with saturated scoring workers: increase
+  `--docker-workers` if RAM, CPU, and disk headroom allow it.
+- High Docker lock wait: repeated cells for the same SWE-bench instance are
+  intentionally serialized to avoid harness image races; adding scorers will
+  not remove that per-instance lock.
+- High Docker scoring time: use warm image caches or a stronger CPU/disk host.
+- High judge time: disable the optional judge when it is not part of the
+  experiment, or account for it when sizing the scoring pool.
+
+`active_wall_seconds` in the timing summary sums scheduler invocation time and
+excludes pauses between resumptions. `calendar_elapsed_seconds` measures from
+run creation and includes that downtime. Phase totals are work-seconds summed
+across cells, so under parallel execution they can exceed overall wall time.
+
 ## Budget behavior
 
 `--budget` is one global cap for the invocation and all resumptions. Before a
@@ -89,8 +144,10 @@ Artifacts live under:
 ```
 results/runs/<run-id>/
   manifest.json
+  progress.json
   summary.json
   summary.csv
+  timing_summary.json
   runs.jsonl
   <cell-id>.log
   cells/<cell-id>/result.json

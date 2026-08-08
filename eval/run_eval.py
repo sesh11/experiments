@@ -23,6 +23,7 @@ from .parallel import run_cells
 from .resources import choose_workers
 from .run_state import (RunStore, atomic_write_json, atomic_write_text,
                         build_cells, new_run_id, resolve_manifest, run_lease)
+from .timing import format_duration, summarize_timing
 
 _OUT = Path("results")
 _CONFIG_FIELDS = set(asdict(config.RunConfig())) - {"budget_usd", "per_task_usd"}
@@ -54,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="parallel agent cells: auto or a positive integer")
     ap.add_argument("--docker-workers", default="auto",
                     help="parallel Docker scorers: auto or a positive integer")
+    ap.add_argument("--progress-interval", type=float, default=10.0,
+                    help="seconds between elapsed-time heartbeats; 0 disables console heartbeats")
     ap.add_argument("--run-id", default=None,
                     help="optional new run id (otherwise generated)")
     ap.add_argument("--resume", default=None,
@@ -277,9 +280,16 @@ def _persist_aggregates(store: RunStore, audit_log: audit.Audit) -> None:
     payloads = store.completed_payloads()
     payloads.sort(key=lambda payload: payload["index"])
     rows = [payload["row"] for payload in payloads]
+    timing = summarize_timing(
+        rows,
+        execution_history=store.manifest.get("resources", {}).get(
+            "execution_history", []),
+        created_at=store.manifest.get("created_at"),
+    )
     for directory in (store.run_dir, _OUT):
         atomic_write_json(directory / "summary.json", rows)
         _write_csv(rows, directory / "summary.csv")
+        atomic_write_json(directory / "timing_summary.json", timing)
     audit_log.rebuild_jsonl(payloads)
 
 
@@ -296,6 +306,9 @@ def _print_tally(rows: list[dict]) -> None:
         test_edits = sum(1 for row in group if row.get("test_files_touched"))
         main = sum(row.get("main_cost_usd", 0) or 0 for row in group)
         side = sum(row.get("sidekick_cost_usd", 0) or 0 for row in group)
+        elapsed = [float(row.get("cell_elapsed_seconds", 0) or 0)
+                   for row in group]
+        mean_elapsed = sum(elapsed) / len(elapsed) if elapsed else 0.0
         notes = []
         if budget_hits:
             notes.append(f"{budget_hits} budget-capped")
@@ -303,6 +316,7 @@ def _print_tally(rows: list[dict]) -> None:
             notes.append(f"{test_edits} edited tests")
         suffix = f"  ({', '.join(notes)})" if notes else ""
         print(f"  {variant}/{cfg_name:<22} resolved {resolved}/{len(group)}  "
+              f"mean time {format_duration(mean_elapsed)}  "
               f"main ${main:.2f} / sidekick ${side:.2f}{suffix}")
 
 
@@ -327,6 +341,7 @@ def _execute(args, store: RunStore, task_list: list[dict],
         budget_usd=budget, per_task_usd=float(experiment["per_task_usd"]),
         no_judge=bool(experiment["no_judge"]), audit_log=audit_log,
         on_persist=lambda: _persist_aggregates(store, audit_log),
+        progress_interval=args.progress_interval,
     )
     invocation = {
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -338,6 +353,9 @@ def _execute(args, store: RunStore, task_list: list[dict],
     }
     store.manifest["resources"].setdefault("execution_history", []).append(invocation)
     store.save()
+    # Refresh timing_summary.json now that this invocation's active wall time is
+    # durable in execution_history.
+    _persist_aggregates(store, audit_log)
     rows = [payload["row"] for payload in store.completed_payloads()]
     _print_tally(rows)
     print(
@@ -345,6 +363,8 @@ def _execute(args, store: RunStore, task_list: list[dict],
         f"{len(rows)} completed cell(s), total spend ${summary.spent_usd:.2f}. ===\n"
         f"    Resume:    python -m eval.run_eval --resume {store.manifest['run_id']}\n"
         f"    Summary:   {store.run_dir}/summary.json + summary.csv\n"
+        f"    Timing:    {store.run_dir}/timing_summary.json\n"
+        f"    Progress:  {store.run_dir}/progress.json\n"
         f"    Full logs: {store.run_dir}/",
         flush=True,
     )
@@ -355,10 +375,17 @@ def _execute(args, store: RunStore, task_list: list[dict],
         f"(peak {summary.telemetry['peak_scoring_cells']})",
         flush=True,
     )
+    print(
+        f"    Elapsed: {format_duration(summary.telemetry['wall_seconds'])}; "
+        f"throughput {summary.telemetry['completed_cells_per_hour']:.1f} cells/hour",
+        flush=True,
+    )
 
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.progress_interval < 0:
+        raise SystemExit("!! --progress-interval must be zero or positive")
     if args.resume:
         manifest_path = resolve_manifest(_OUT, args.resume)
         try:

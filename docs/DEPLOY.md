@@ -77,14 +77,16 @@ Actions → **eval** → **Run workflow**, choose:
 When it finishes:
 - the **Summary** shows the per-run table (for budget > 0),
 - **Artifacts** has `eval-results-<run_id>.zip` with `results/summary.csv`,
-  `results/runs/<stamp>/` (per-run logs), and the harness reports.
+  `results/runs/<stamp>/` (including `progress.json`, raw per-cell timings, and
+  `timing_summary.json`), plus the harness reports.
 
 The eval driver automatically sizes separate agent and Docker-scoring pools for
 the current EC2 CPU, available RAM, and disk. Runs persist an atomic manifest;
 if a job or instance is interrupted, copy the printed command
 `python -m eval.run_eval --resume <run-id>` and run it from the same checkout and
 results volume. See [PARALLEL_EVAL.md](PARALLEL_EVAL.md) for manual worker
-overrides, configuration matrices, and the paid serial/parallel benchmark.
+overrides, live elapsed-time monitoring, phase-based tuning, configuration
+matrices, and the paid serial/parallel benchmark.
 
 For an archived performance comparison, use **Actions →
 parallel-eval-benchmark → Run workflow**. `budget_per_arm` applies separately to

@@ -86,6 +86,17 @@ class Audit:
                      f"sidekick ${res.ledger.get('sidekick_cost_usd', 0)})")
         parts.append(f"steps: {res.steps}   finished(finish() called): {res.finished}   "
                      f"budget_hit: {res.budget_hit}")
+        timing = (cell_meta or {}).get("timing", {})
+        if timing:
+            parts.append(
+                "timing seconds: "
+                f"queue={timing.get('queue_wait_seconds', 0)}  "
+                f"setup={timing.get('workspace_setup_seconds', 0)}  "
+                f"runtime={timing.get('runtime_wall_seconds', 0)}  "
+                f"score_wait={timing.get('scoring_queue_wait_seconds', 0)}  "
+                f"docker={timing.get('docker_scoring_wall_seconds', 0)}  "
+                f"judge={timing.get('judge_wall_seconds', 0)}  "
+                f"cell={timing.get('cell_elapsed_seconds', 0)}")
         if quality is not None:
             parts.append(f"judge quality: {quality}   would_merge: {would_merge}")
         if res.error:

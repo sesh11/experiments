@@ -84,6 +84,7 @@ eval/
   run_state.py     stable cell identities, atomic manifest, resume journal
   isolation.py     private local clone per concurrent SWE-bench cell
   resources.py     EC2 CPU/RAM/disk-aware automatic worker sizing
+  timing.py        phase statistics + elapsed-time formatting
   report.py        results/pareto.png + per-variant table
 scripts/
   smoke_workspace.py   no-LLM check of the workspace/test loop
@@ -167,7 +168,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Resource-aware parallelism is automatic. Override or force serial execution:
 python -m eval.run_eval --source swebench --backend docker --limit 10 \
   --variants frontier_only scout --budget 25 --no-judge \
-  --workers auto --docker-workers auto
+  --workers auto --docker-workers auto --progress-interval 10
 # add: --workers 1 --docker-workers 1   # serial compatibility mode
 
 # Report
@@ -231,9 +232,12 @@ exhausted, undispatched cells remain recorded in the run manifest.
 Runs are parallel and resumable. Each `(SWE-bench instance, variant,
 configuration, repetition)` is an isolated cell; automatic worker sizing adapts
 to EC2 CPU/RAM/disk, while Docker scoring has its own lower concurrency bound.
-Every run prints `python -m eval.run_eval --resume <run-id>`. See
+Every run prints elapsed/throughput/ETA heartbeats and writes live
+`progress.json`, raw per-cell phase columns in `summary.csv`, and aggregate
+p50/p95 timing in `timing_summary.json`. It also prints
+`python -m eval.run_eval --resume <run-id>`. See
 [docs/PARALLEL_EVAL.md](docs/PARALLEL_EVAL.md) for configuration matrices,
-budget reservations, artifacts, interruption behavior, and benchmarking.
+budget reservations, timing-based tuning, interruption behavior, and benchmarking.
 
 ## Pricing (pinned, standard rates per 1M tokens)
 

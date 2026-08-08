@@ -19,6 +19,7 @@ from eval.run_eval import (_load_configurations, _persist_aggregates,
                            _validate_resume_args)
 from eval.resources import GIB, ResourceSnapshot, choose_workers
 from eval.run_state import RunStore, build_cells, run_lease
+from eval.timing import format_duration, summarize_timing
 from fusion import config as fusion_config
 from fusion.llm import BudgetExceeded, LLMClient, Ledger
 from orchestrator.variants import PolicyResult
@@ -92,6 +93,8 @@ def test_manifest_resume_recovers_running_but_keeps_completed(tmp_path):
     assert resumed.status(cells[0].cell_id) == "pending"
     assert resumed.status(cells[1].cell_id) == "completed"
     assert resumed.spent_usd == pytest.approx(0.2)
+    assert resumed.manifest["cells"][cells[0].cell_id]["attempt_history"][0][
+        "outcome"] == "interrupted"
 
 
 def test_run_lease_refuses_a_second_coordinator(tmp_path):
@@ -266,8 +269,72 @@ def test_parallel_cells_are_faster_and_failures_are_isolated(tmp_path):
     assert summary.telemetry["minimum_disk_available_bytes"] is not None
     assert [p["index"] for p in payloads] == list(range(6))
     assert all("model_patch" in payload for payload in payloads)
+    assert all(payload["row"]["runtime_wall_seconds"] >= 0.1
+               for payload in payloads)
+    assert all(payload["row"]["cell_elapsed_seconds"]
+               >= payload["row"]["agent_wall_seconds"]
+               for payload in payloads)
+    progress = json.loads((store.run_dir / "progress.json").read_text())
+    assert progress["status"] == "completed"
+    assert progress["cells"]["completed"] == 6
+    assert progress["active"] == {"agents": [], "scoring": []}
     failed = next(p["row"] for p in payloads if p["row"]["task"] == "task-2")
     assert "intentional cell failure" in failed["error"]
+
+
+def test_phase_timing_is_live_and_aggregated(tmp_path):
+    tasks = _tasks(2, backend="docker")
+    store, log, cells = _store(tmp_path, tasks)
+
+    def fake_run(variant, task, cfg):
+        time.sleep(0.03)
+        return _result(variant)
+
+    def fake_score(instance_id, diff, **kwargs):
+        time.sleep(0.02)
+        return {"resolved": True, "detail": "ok", "applied": True,
+                "report": {}, "harness_tail": ""}
+
+    with (patch("eval.parallel.variants.run_variant", side_effect=fake_run),
+          patch("eval.parallel.docker_score.score_patch", side_effect=fake_score),
+          patch("eval.parallel.judge.max_cost_upper_bound", return_value=0.1),
+          patch("eval.parallel.judge.judge_merge", side_effect=lambda *args: (
+              time.sleep(0.01) or {"score": 90, "would_merge": True,
+                                   "rationale": "ok", "cost_usd": 0.0}))):
+        summary = run_cells(
+            store=store, tasks=tasks, workers=2, docker_workers=2,
+            budget_usd=10, per_task_usd=1, no_judge=False,
+            audit_log=log, on_persist=lambda: None, progress_interval=0,
+        )
+
+    rows = [payload["row"] for payload in store.completed_payloads()]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["runtime_wall_seconds"] >= 0.02
+        assert row["docker_scoring_wall_seconds"] >= 0.01
+        assert row["judge_wall_seconds"] >= 0.005
+        assert row["cell_elapsed_seconds"] >= row["agent_wall_seconds"]
+        assert row["dispatched_at"]
+        assert row["completed_at"]
+    entry = store.manifest["cells"][cells[0].cell_id]
+    assert entry["timing"]["cell_elapsed_seconds"] > 0
+
+    progress = json.loads((store.run_dir / "progress.json").read_text())
+    assert progress["status"] == "completed"
+    assert progress["invocation"]["elapsed_seconds"] > 0
+    assert progress["run"]["active_elapsed_seconds"] > 0
+    assert progress["budget"]["reserved_usd"] == 0
+
+    timing = summarize_timing(
+        rows, execution_history=[summary.telemetry],
+        created_at=store.manifest["created_at"])
+    assert timing["overall"]["phases"]["runtime_wall_seconds"]["count"] == 2
+    assert timing["overall"]["phases"]["cell_elapsed_seconds"]["p95"] > 0
+    assert timing["run"]["active_wall_seconds"] == summary.telemetry["wall_seconds"]
+    assert timing["by_variant_config"][0]["variant"] == "fake"
+    assert format_duration(0.25) == "0.25s"
+    assert format_duration(65) == "01:05"
+    assert format_duration(3661) == "1:01:01"
 
 
 def test_global_budget_reservations_prevent_overdispatch(tmp_path):

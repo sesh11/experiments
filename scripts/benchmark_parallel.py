@@ -69,6 +69,11 @@ def _manifest(run_dir: Path) -> dict:
     return json.loads((run_dir / "manifest.json").read_text())
 
 
+def _timing_summary(run_dir: Path) -> dict:
+    path = run_dir / "timing_summary.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
 def _latest_telemetry(manifest: dict) -> dict:
     history = manifest.get("resources", {}).get("execution_history", [])
     return history[-1] if history else {}
@@ -213,6 +218,8 @@ def main() -> None:
     parallel_rows = _rows(parallel_dir)
     serial_manifest = _manifest(serial_dir)
     parallel_manifest = _manifest(parallel_dir)
+    serial_timing = _timing_summary(serial_dir)
+    parallel_timing = _timing_summary(parallel_dir)
     serial_telemetry = _latest_telemetry(serial_manifest)
     parallel_telemetry = _latest_telemetry(parallel_manifest)
     serial_by_key = {_key(row): row for row in serial_rows}
@@ -258,6 +265,8 @@ def main() -> None:
         "scoring_differences": scoring_differences,
         "serial_scheduler_telemetry": serial_telemetry,
         "parallel_scheduler_telemetry": parallel_telemetry,
+        "serial_timing_summary": serial_timing,
+        "parallel_timing_summary": parallel_timing,
         "serial_resource_use": _resource_report(serial_manifest, serial_telemetry),
         "parallel_resource_use": _resource_report(parallel_manifest, parallel_telemetry),
         "parallel_bottleneck": _bottleneck(parallel_manifest, parallel_telemetry),

@@ -37,6 +37,8 @@ def aggregate(rows: list[dict]) -> dict[str, dict]:
         cost = sum(r.get("cell_cost_usd", r.get("run_cost_usd", 0)) for r in rs) / n
         main = sum(r.get("main_cost_usd", 0) for r in rs)
         side = sum(r.get("sidekick_cost_usd", 0) for r in rs)
+        elapsed = sorted(float(r.get("cell_elapsed_seconds", 0) or 0) for r in rs)
+        p95_index = min(len(elapsed) - 1, max(0, int(len(elapsed) * 0.95)))
         agg[variant] = {
             "n": n,
             "resolve_rate": resolved,
@@ -44,6 +46,8 @@ def aggregate(rows: list[dict]) -> dict[str, dict]:
             "mean_cost": cost,
             "main_cost": main,
             "sidekick_cost": side,
+            "mean_elapsed_seconds": sum(elapsed) / len(elapsed),
+            "p95_elapsed_seconds": elapsed[p95_index],
         }
     return agg
 
@@ -51,11 +55,12 @@ def aggregate(rows: list[dict]) -> dict[str, dict]:
 def print_table(agg: dict[str, dict]) -> None:
     width = max(16, *(len(label) + 2 for label in agg)) if agg else 16
     print(f"\n{'variant/config':<{width}}{'n':>3}{'resolve':>9}{'quality':>9}"
-          f"{'$/task':>9}{'main$':>9}{'side$':>9}")
-    print("-" * (width + 48))
+          f"{'$/task':>9}{'mean s':>9}{'p95 s':>9}{'main$':>9}{'side$':>9}")
+    print("-" * (width + 66))
     for variant, a in agg.items():
         print(f"{variant:<{width}}{a['n']:>3}{a['resolve_rate']:>9.0%}"
               f"{a['mean_quality']:>9.1f}{a['mean_cost']:>9.4f}"
+              f"{a['mean_elapsed_seconds']:>9.1f}{a['p95_elapsed_seconds']:>9.1f}"
               f"{a['main_cost']:>9.4f}{a['sidekick_cost']:>9.4f}")
 
 

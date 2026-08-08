@@ -168,8 +168,16 @@ class RunStore:
         # Their private workspaces are disposable and will be rebuilt from base.
         for entry in store.manifest["cells"].values():
             if entry["status"] in {"running", "scoring"}:
+                timing = entry.get("timing") or {}
+                if timing:
+                    entry.setdefault("attempt_history", []).append({
+                        **timing,
+                        "outcome": "interrupted",
+                        "interrupted_at": datetime.now(timezone.utc).isoformat(),
+                    })
                 entry["status"] = "pending"
                 entry["reserved_usd"] = 0.0
+                entry["timing"] = {}
         store.save()
         return store
 
@@ -191,24 +199,47 @@ class RunStore:
                    for c in self.manifest["cells"].values()
                    if c["status"] == "completed")
 
-    def mark_running(self, cell_id: str, reserved_usd: float) -> None:
+    def mark_running(self, cell_id: str, reserved_usd: float, *,
+                     started_at: str | None = None,
+                     queue_wait_seconds: float | None = None) -> None:
         entry = self.manifest["cells"][cell_id]
         entry["status"] = "running"
         entry["attempts"] += 1
         entry["reserved_usd"] = round(reserved_usd, 6)
+        entry["timing"] = {
+            "dispatched_at": started_at or datetime.now(timezone.utc).isoformat(),
+            "queue_wait_seconds": (
+                round(queue_wait_seconds, 3)
+                if queue_wait_seconds is not None else None),
+        }
         self.save()
 
-    def mark_scoring(self, cell_id: str) -> None:
-        self.manifest["cells"][cell_id]["status"] = "scoring"
+    def mark_scoring(self, cell_id: str, *, agent_finished_at: str | None = None,
+                     timing: dict | None = None) -> None:
+        entry = self.manifest["cells"][cell_id]
+        entry["status"] = "scoring"
+        entry.setdefault("timing", {}).update(timing or {})
+        entry["timing"]["agent_finished_at"] = (
+            agent_finished_at or datetime.now(timezone.utc).isoformat())
         self.save()
 
     def mark_pending(self, cell_id: str) -> None:
         entry = self.manifest["cells"][cell_id]
+        timing = entry.get("timing") or {}
+        if timing:
+            entry.setdefault("attempt_history", []).append({
+                **timing,
+                "outcome": "returned_to_pending",
+                "interrupted_at": datetime.now(timezone.utc).isoformat(),
+            })
         entry["status"] = "pending"
         entry["reserved_usd"] = 0.0
+        entry["timing"] = {}
         self.save()
 
-    def complete(self, cell_id: str, payload: dict, actual_cost_usd: float) -> None:
+    def complete(self, cell_id: str, payload: dict, actual_cost_usd: float, *,
+                 completed_at: str | None = None,
+                 timing: dict | None = None) -> None:
         cell_dir = self.cells_dir / cell_id
         result_path = cell_dir / "result.json"
         atomic_write_json(result_path, payload)
@@ -218,13 +249,16 @@ class RunStore:
             "reserved_usd": 0.0,
             "actual_cost_usd": actual_cost_usd,
             "result_file": str(result_path.relative_to(self.run_dir)),
+            "completed_at": completed_at or datetime.now(timezone.utc).isoformat(),
         })
+        entry.setdefault("timing", {}).update(timing or {})
         self.save()
 
     def skip_budget(self, cell_id: str, reason: str) -> None:
         entry = self.manifest["cells"][cell_id]
         entry.update({"status": "skipped_budget", "reserved_usd": 0.0,
-                      "skip_reason": reason})
+                      "skip_reason": reason,
+                      "completed_at": datetime.now(timezone.utc).isoformat()})
         self.save()
 
     def reopen_budget_skips(self) -> None:
@@ -233,6 +267,7 @@ class RunStore:
             if entry["status"] == "skipped_budget":
                 entry["status"] = "pending"
                 entry.pop("skip_reason", None)
+                entry.pop("completed_at", None)
                 changed = True
         if changed:
             self.save()
@@ -250,6 +285,7 @@ class RunStore:
                 entry["status"] = "pending"
                 entry["actual_cost_usd"] = 0.0
                 entry["result_file"] = None
+                entry.pop("completed_at", None)
                 self.save()
                 continue
             payloads.append(json.loads(path.read_text()))
