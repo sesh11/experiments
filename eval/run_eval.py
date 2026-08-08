@@ -40,12 +40,29 @@ def _parser() -> argparse.ArgumentParser:
                     help="$ cap per experiment cell's agent execution")
     ap.add_argument("--no-judge", action="store_true", default=None,
                     help="skip the quality judge")
+    ap.add_argument("--provider", default=None, choices=config.PROVIDERS,
+                    help="provider for main and sidekick model calls")
+    ap.add_argument("--main-model", default=None,
+                    help="main model id (OpenRouter ids normally include provider prefix)")
+    ap.add_argument("--sidekick-model", default=None,
+                    help="sidekick/scout model id")
+    ap.add_argument("--judge-provider", default=None, choices=config.PROVIDERS,
+                    help="provider for the quality judge (independent of --provider)")
+    ap.add_argument("--judge-model", default=None,
+                    help="quality judge model id")
+    ap.add_argument("--openrouter-base-url", default=None,
+                    help="OpenRouter-compatible API base URL")
+    ap.add_argument("--openrouter-site-url", default=None,
+                    help="optional HTTP-Referer app attribution URL")
+    ap.add_argument("--openrouter-app-name", default=None,
+                    help="optional X-OpenRouter-Title app attribution name")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="override tool-loop steps in every configuration")
     ap.add_argument("--backend", choices=["local", "docker"], default=None,
                     help="SWE-bench scoring backend")
     ap.add_argument("--instance-ids-file", default=None,
-                    help="run exactly these instance ids, one per line")
+                    help="run exactly these instance ids, one per line; the confirm "
+                         "flow points this at the gold-verified set")
     ap.add_argument("--configs-file", default=None,
                     help="JSON configuration matrix; each entry has name/run_config")
     ap.add_argument("--repetitions", type=int, default=None,
@@ -65,6 +82,62 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _config_from_args(args: argparse.Namespace) -> config.RunConfig:
+    """Build the effective single configuration (kept for API/test compatibility)."""
+    base = config.RunConfig()
+    provider = args.provider or base.provider
+    main_model = args.main_model or base.main_model
+    return config.RunConfig(
+        provider=provider,
+        main_model=main_model,
+        sidekick_model=args.sidekick_model or base.sidekick_model,
+        judge_provider=(args.judge_provider or
+                        (provider if args.provider else base.judge_provider)),
+        judge_model=(args.judge_model or
+                     (main_model if args.provider or args.main_model else base.judge_model)),
+        openrouter_base_url=args.openrouter_base_url or base.openrouter_base_url,
+        openrouter_site_url=(base.openrouter_site_url if args.openrouter_site_url is None
+                             else args.openrouter_site_url),
+        openrouter_app_name=(base.openrouter_app_name if args.openrouter_app_name is None
+                             else args.openrouter_app_name),
+        budget_usd=(base.budget_usd if args.per_task is None else args.per_task),
+        per_task_usd=(base.per_task_usd if args.per_task is None else args.per_task),
+        max_steps=(base.max_steps if args.max_steps is None else args.max_steps),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Public parser factory retained for callers from the serial driver."""
+    return _parser()
+
+
+def _cli_config_overrides(args: argparse.Namespace) -> dict:
+    mapping = {
+        "provider": "provider",
+        "main_model": "main_model",
+        "sidekick_model": "sidekick_model",
+        "judge_provider": "judge_provider",
+        "judge_model": "judge_model",
+        "openrouter_base_url": "openrouter_base_url",
+        "openrouter_site_url": "openrouter_site_url",
+        "openrouter_app_name": "openrouter_app_name",
+    }
+    overrides = {
+        field: getattr(args, arg, None)
+        for arg, field in mapping.items()
+        if getattr(args, arg, None) is not None
+    }
+    base = config.RunConfig()
+    if (getattr(args, "provider", None) is not None
+            and getattr(args, "judge_provider", None) is None):
+        overrides["judge_provider"] = args.provider
+    if ((getattr(args, "provider", None) is not None
+         or getattr(args, "main_model", None) is not None)
+            and getattr(args, "judge_model", None) is None):
+        overrides["judge_model"] = getattr(args, "main_model", None) or base.main_model
+    return overrides
+
+
 def _read_instance_ids(path: str | None) -> list[str] | None:
     if not path:
         return None
@@ -82,12 +155,16 @@ def _base_run_config() -> dict:
     return {key: raw[key] for key in sorted(_CONFIG_FIELDS)}
 
 
-def _load_configurations(path: str | None, max_steps: int | None) -> list[dict]:
+def _load_configurations(path: str | None, max_steps: int | None,
+                         cli_overrides: dict | None = None) -> list[dict]:
     base = _base_run_config()
+    explicit = dict(cli_overrides or {})
+    if max_steps is not None:
+        explicit["max_steps"] = max_steps
     if not path:
-        if max_steps is not None:
-            base["max_steps"] = max_steps
-        return [{"name": "default", "run_config": base}]
+        merged = {**base, **explicit}
+        config.RunConfig(**merged)
+        return [{"name": "default", "run_config": merged}]
     raw = json.loads(Path(path).read_text())
     entries = raw.get("configurations") if isinstance(raw, dict) else raw
     if not isinstance(entries, list) or not entries:
@@ -111,9 +188,7 @@ def _load_configurations(path: str | None, max_steps: int | None) -> list[dict]:
         if name in names:
             raise SystemExit(f"!! duplicate configuration name: {name}")
         names.add(name)
-        merged = {**base, **overrides}
-        if max_steps is not None:
-            merged["max_steps"] = max_steps
+        merged = {**base, **overrides, **explicit}
         # Let the dataclass validate constructor compatibility now, not after
         # paid work has started.
         config.RunConfig(**merged)
@@ -152,8 +227,10 @@ def _validate_resume_args(args, experiment: dict) -> None:
     ids = _read_instance_ids(args.instance_ids_file)
     if ids is not None and ids != experiment["task_ids"]:
         raise SystemExit("!! --resume instance id file differs from the manifest")
-    if args.configs_file or args.max_steps is not None:
-        supplied = _load_configurations(args.configs_file, args.max_steps)
+    cli_overrides = _cli_config_overrides(args)
+    if args.configs_file or args.max_steps is not None or cli_overrides:
+        supplied = _load_configurations(
+            args.configs_file, args.max_steps, cli_overrides)
         if supplied != experiment["configurations"]:
             raise SystemExit("!! --resume configurations differ from the manifest")
 
@@ -188,7 +265,16 @@ def _new_run(args) -> tuple[RunStore, list[dict], dict, float]:
             raise SystemExit(f"!! --backend docker unavailable: {reason}")
         print(f"Docker scoring backend ready ({reason})")
     task_list = tasks.load(source, requested_limit, backend=backend, instance_ids=ids)
-    configurations = _load_configurations(args.configs_file, args.max_steps)
+    configurations = _load_configurations(
+        args.configs_file, args.max_steps, _cli_config_overrides(args))
+    uses_openrouter = any(
+        cfg["run_config"]["provider"] == "openrouter"
+        or (not no_judge and cfg["run_config"]["judge_provider"] == "openrouter")
+        for cfg in configurations
+    )
+    if uses_openrouter and not os.environ.get("OPENROUTER_API_KEY", "").strip():
+        raise SystemExit(
+            "!! OPENROUTER_API_KEY is required for the selected provider/judge")
     cells = build_cells(task_list, variants_list, configurations, repetitions, base_seed)
     if len({c.cell_id for c in cells}) != len(cells):
         raise SystemExit("!! experiment matrix produced duplicate cell identities")
@@ -400,14 +486,17 @@ def main() -> None:
         try:
             with run_lease(manifest_path.parent):
                 _execute(args, *_resume_run(args))
-        except RuntimeError as exc:
+        except (RuntimeError, config.ConfigurationError) as exc:
             raise SystemExit(f"!! {exc}") from exc
         return
-    store, task_list, experiment, budget = _new_run(args)
+    try:
+        store, task_list, experiment, budget = _new_run(args)
+    except config.ConfigurationError as exc:
+        raise SystemExit(f"!! {exc}") from exc
     try:
         with run_lease(store.run_dir):
             _execute(args, store, task_list, experiment, budget)
-    except RuntimeError as exc:
+    except (RuntimeError, config.ConfigurationError) as exc:
         raise SystemExit(f"!! {exc}") from exc
 
 

@@ -200,7 +200,14 @@ def _score_stage(agent: AgentOutput, base_task: dict, *, run_id: str,
     if not no_judge:
         judge_started = time.monotonic()
         try:
-            verdict = judge.judge_merge(base_task, res.diff, res.resolved)
+            judge_cfg = config.RunConfig(
+                **agent.cell.config,
+                budget_usd=max(agent.judge_reserved_usd, 0.01),
+                per_task_usd=max(
+                    agent.reserved_usd - agent.judge_reserved_usd, 0.01),
+            )
+            verdict = judge.judge_merge(
+                base_task, res.diff, res.resolved, judge_cfg)
             quality = verdict["score"]
             would_merge = verdict["would_merge"]
             judge_cost = float(verdict.get("cost_usd", 0.0) or 0.0)
@@ -619,12 +626,20 @@ def run_cells(*, store: RunStore, tasks: list[dict], workers: int,
                 pressure_note = ""
                 cell = pending[0]
                 task = tasks[cell.task_index]
-                judge_reserve = (0.0 if no_judge else
-                                 judge.max_cost_upper_bound(task, worst_case=True))
+                cell_cfg = config.RunConfig(
+                    **cell.config,
+                    budget_usd=per_task_usd,
+                    per_task_usd=per_task_usd,
+                )
+                judge_reserve = (
+                    0.0 if no_judge else
+                    judge.max_cost_upper_bound(
+                        task, cell_cfg, worst_case=True)
+                )
                 desired = per_task_usd + judge_reserve
                 available = reservations.available
-                # Wait for active reservations to settle before shrinking a
-                # later cell's cap. This retains serial budget semantics.
+                # Wait for active reservations to settle before deciding the
+                # remaining global budget cannot fund another full cell.
                 if available + 1e-9 < desired and reservations.active:
                     break
                 agent_cap = per_task_usd

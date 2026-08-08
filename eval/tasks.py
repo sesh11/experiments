@@ -13,16 +13,19 @@ Every task dict has: instance_id, problem_statement, template_dir, test_cmd.
 
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 
 _HERE = Path(__file__).parent
 _DATA = _HERE / "tasks_data"
+_PYTEST = f"{shlex.quote(sys.executable)} -m pytest -q"
 
 _NATIVE = [
     {
         "instance_id": "native__slugify",
         "template_dir": str(_DATA / "slugify"),
-        "test_cmd": "python -m pytest -q",
+        "test_cmd": _PYTEST,
         "problem_statement": (
             "slugify(' Hello, World! ') returns '-hello-world-' but should return "
             "'hello-world'. Leading/trailing separators must be trimmed, and runs of "
@@ -32,7 +35,7 @@ _NATIVE = [
     {
         "instance_id": "native__median",
         "template_dir": str(_DATA / "median"),
-        "test_cmd": "python -m pytest -q",
+        "test_cmd": _PYTEST,
         "problem_statement": (
             "median() is wrong for even-length inputs: median([1,2,3,4]) returns 3 but "
             "should return 2.5 (the average of the two middle values). Odd-length inputs "

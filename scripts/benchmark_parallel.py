@@ -27,6 +27,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from fusion import config
+
 
 def _results_dir() -> Path:
     return Path(os.environ.get("EVAL_RESULTS_DIR", "results")).expanduser()
@@ -83,6 +85,53 @@ def _preflight_anthropic() -> None:
     print("Anthropic credential preflight passed (no token-generating call).", flush=True)
 
 
+def _preflight_openrouter(base_url: str) -> None:
+    """Validate OpenRouter credentials without generating billable tokens."""
+    from openai import APIError, AuthenticationError, OpenAI
+
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if (not key or key in {"sk-or-v1-...", "sk-or-v1-your-key-here"}
+            or "your-key" in key.lower()):
+        raise SystemExit(
+            "OpenRouter preflight failed: OPENROUTER_API_KEY is missing or still "
+            "a placeholder. Update .env or export a valid key before benchmarking.")
+    try:
+        client = OpenAI(
+            api_key=key, base_url=base_url.rstrip("/"),
+            timeout=10.0, max_retries=0)
+        client.models.list()
+    except AuthenticationError:
+        raise SystemExit(
+            "OpenRouter preflight failed: the API rejected OPENROUTER_API_KEY. "
+            "Update .env and retry.") from None
+    except APIError as exc:
+        raise SystemExit(
+            f"OpenRouter preflight failed before any benchmark work: "
+            f"{type(exc).__name__}: {exc}") from None
+    print("OpenRouter credential preflight passed (no token-generating call).", flush=True)
+
+
+def _preflight_selected_providers(args: argparse.Namespace) -> None:
+    provider = (args.provider or os.environ.get("LLM_PROVIDER")
+                or config.DEFAULT_PROVIDER).lower()
+    providers = {provider}
+    if args.with_judge:
+        judge_provider = (args.judge_provider
+                          or (provider if args.provider else
+                              os.environ.get("JUDGE_PROVIDER", provider))).lower()
+        providers.add(judge_provider)
+    unknown = providers - set(config.PROVIDERS)
+    if unknown:
+        raise SystemExit(f"Unsupported provider(s): {', '.join(sorted(unknown))}")
+    if "anthropic" in providers:
+        _preflight_anthropic()
+    if "openrouter" in providers:
+        _preflight_openrouter(
+            args.openrouter_base_url
+            or os.environ.get("OPENROUTER_BASE_URL")
+            or config.OPENROUTER_BASE_URL)
+
+
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance-ids-file", required=True)
@@ -96,6 +145,14 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--parallel-workers", default="auto")
     ap.add_argument("--parallel-docker-workers", default="auto")
     ap.add_argument("--with-judge", action="store_true")
+    ap.add_argument("--provider", choices=config.PROVIDERS)
+    ap.add_argument("--main-model")
+    ap.add_argument("--sidekick-model")
+    ap.add_argument("--judge-provider", choices=config.PROVIDERS)
+    ap.add_argument("--judge-model")
+    ap.add_argument("--openrouter-base-url")
+    ap.add_argument("--openrouter-site-url")
+    ap.add_argument("--openrouter-app-name")
     ap.add_argument("--skip-scoring-parity", action="store_true",
                     help="skip no-LLM replay of serial patches through parallel Docker scoring")
     return ap
@@ -115,6 +172,18 @@ def _invoke(run_id: str, args, *, workers: str, docker_workers: str) -> tuple[fl
     ]
     if args.configs_file:
         cmd += ["--configs-file", args.configs_file]
+    for flag, value in (
+        ("--provider", args.provider),
+        ("--main-model", args.main_model),
+        ("--sidekick-model", args.sidekick_model),
+        ("--judge-provider", args.judge_provider),
+        ("--judge-model", args.judge_model),
+        ("--openrouter-base-url", args.openrouter_base_url),
+        ("--openrouter-site-url", args.openrouter_site_url),
+        ("--openrouter-app-name", args.openrouter_app_name),
+    ):
+        if value is not None:
+            cmd += [flag, value]
     if not args.with_judge:
         cmd.append("--no-judge")
     started = time.monotonic()
@@ -277,7 +346,7 @@ def main() -> None:
             Path(os.environ["EVAL_RESULTS_DIR"]).expanduser().resolve())
     os.chdir(_REPO_ROOT)
     _load_local_env()
-    _preflight_anthropic()
+    _preflight_selected_providers(args)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     serial_id = f"benchmark_{stamp}_serial"
     parallel_id = f"benchmark_{stamp}_parallel"

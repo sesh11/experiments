@@ -69,8 +69,9 @@ class PiRuntime:
         pi_bin = _find_pi()
         if pi_bin is None:
             raise RuntimeUnavailable(_INSTALL_HINT)
+        routed_model = config.api_model(cfg.provider, model)
         cmd = [
-            pi_bin, "--provider", "anthropic", "--model", model,
+            pi_bin, "--provider", cfg.provider, "--model", routed_model,
             "--thinking", "off", "--mode", "json", "--print",
             "--no-session", "--no-extensions", "--no-skills",
             "--no-prompt-templates", "--no-themes", "--no-context-files",
@@ -80,9 +81,13 @@ class PiRuntime:
         # and stop before another turn when a full-context request could exceed
         # the cell cap. This converts the former post-hoc-only guard into a hard
         # bound with one request's maximum reserved before every next turn.
-        next_call_ceiling = config.absolute_request_cost_upper_bound(
-            model, max_output_tokens=cfg.max_tokens)
-        ledger.ensure_capacity(next_call_ceiling)
+        next_call_ceiling = (
+            config.absolute_request_cost_upper_bound(
+                routed_model, max_output_tokens=cfg.max_tokens)
+            if config.has_pinned_price(routed_model) else None
+        )
+        if next_call_ceiling is not None:
+            ledger.ensure_capacity(next_call_ceiling)
         timed_out = [False]
         budget_stopped = False
         lines: list[str] = []
@@ -91,8 +96,10 @@ class PiRuntime:
         pi_config_dir.mkdir(exist_ok=True)
         (pi_config_dir / "models.json").write_text(json.dumps({
             "providers": {
-                "anthropic": {
-                    "modelOverrides": {model: {"maxTokens": cfg.max_tokens}}
+                cfg.provider: {
+                    "modelOverrides": {
+                        routed_model: {"maxTokens": cfg.max_tokens}
+                    }
                 }
             }
         }))
@@ -127,14 +134,19 @@ class PiRuntime:
                     if msg.get("role") != "assistant":
                         continue
                     usage = msg.get("usage", {})
-                    live_cost += config.cost_for(
-                        model,
-                        input_tokens=int(usage.get("input", 0) or 0),
-                        output_tokens=int(usage.get("output", 0) or 0),
-                        cache_read_tokens=int(usage.get("cacheRead", 0) or 0),
-                        cache_write_tokens=int(usage.get("cacheWrite", 0) or 0),
-                    )
+                    if config.has_pinned_price(routed_model):
+                        live_cost += config.cost_for(
+                            routed_model,
+                            input_tokens=int(usage.get("input", 0) or 0),
+                            output_tokens=int(usage.get("output", 0) or 0),
+                            cache_read_tokens=int(usage.get("cacheRead", 0) or 0),
+                            cache_write_tokens=int(usage.get("cacheWrite", 0) or 0),
+                        )
+                    else:
+                        live_cost += float(
+                            (usage.get("cost") or {}).get("total", 0) or 0)
                     if (msg.get("stopReason") != "stop"
+                            and next_call_ceiling is not None
                             and live_cost + next_call_ceiling > ledger.cap_usd):
                         budget_stopped = True
                         proc.terminate()
@@ -152,26 +164,33 @@ class PiRuntime:
 
         events = _parse_events(stdout)
         totals, pi_cost, steps, last_text, last_stop, api_error = _digest(events)
-        role = "main" if model == config.MODEL_MAIN else "sidekick"
+        role = "main" if model == cfg.main_model else "sidekick"
         # Consolidate the live-observed stream into the shared ledger using
         # pinned pricing (the scheduler only consumes this common interface).
         ledger.record_tokens(
-            role, model,
+            role, routed_model,
             input_tokens=totals["input"], output_tokens=totals["output"],
             cache_write_tokens=totals["cacheWrite"],
             cache_read_tokens=totals["cacheRead"],
+            cost_usd=(
+                None if config.has_pinned_price(routed_model)
+                else (pi_cost if pi_cost > 0 else None)
+            ),
         )
         recomputed = ledger.by_role[role].cost_usd
         extra = {
             "pi_reported_cost_usd": round(pi_cost, 6),
             "recomputed_cost_usd": round(recomputed, 6),
-            "budget_enforcement": "live-event-stream",
+            "budget_enforcement": (
+                "live-event-stream" if next_call_ceiling is not None
+                else "provider-reported-post-call"
+            ),
         }
         if pi_cost and abs(pi_cost - recomputed) / max(recomputed, 1e-9) > 0.10:
             extra["pricing_warning"] = (
                 f"pi self-reported cost ${pi_cost:.4f} deviates >10% from "
                 f"pinned-pricing recompute ${recomputed:.4f} "
-                f"(pi's registry may not know '{model}')")
+                f"(pi's registry may not know '{routed_model}')")
         if budget_stopped:
             from fusion.llm import BudgetExceeded
             raise BudgetExceeded(

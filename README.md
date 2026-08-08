@@ -45,16 +45,20 @@ We can't run FrontierCode (Cognition withholds the tasks). So we validate on a p
 proxy — a bundled native mini-set by default, or a SWE-bench Verified slice — and add a
 lightweight LLM **"would you merge this?"** judge to echo FrontierCode's quality axis.
 
-The deliverable is a **cost-vs-quality** comparison across three variants:
+The deliverable is a **cost-vs-quality** comparison across the orchestration variants:
 
-| variant          | main        | sidekick    | idea under test |
-|------------------|-------------|-------------|-----------------|
-| `frontier_only`  | Sonnet 5    | –           | high-cost baseline |
-| `sidekick_only`  | –           | Haiku 4.5   | low-cost baseline |
-| `scout`          | Sonnet 5    | Haiku 4.5   | **A — read-only Scout** |
+| variant          | plans / locates | authors edit | idea under test |
+|------------------|-----------------|--------------|-----------------|
+| `frontier_only`  | Sonnet 5        | Sonnet 5     | high-cost baseline |
+| `sidekick_only`  | Haiku 4.5       | Haiku 4.5    | low-cost baseline |
+| `scout`          | Haiku 4.5 (reads) | Sonnet 5   | **A — read-only Scout** (Sonnet delegates reads) |
+| `inverted`       | Haiku 4.5       | Sonnet 5     | **Inverted** — Haiku plans+locates, Sonnet authors from a brief |
 
-Success = `scout` sits at lower cost than `frontier_only` for comparable quality, and
-clearly above `sidekick_only` on quality.
+Success for `scout` = lower cost than `frontier_only` at comparable quality, clearly above
+`sidekick_only` on quality. `inverted` tests the complementary bet: push the token-heavy
+exploration *and* the fix-planning onto Haiku, so Sonnet only pays to author the edit from a
+compact brief (targeted `read_file` only, no repo-wide search). Toggle any variant with
+`--variants <name>`.
 
 ## Layout
 
@@ -69,13 +73,13 @@ runtimes/
   stirrup_rt.py    Stirrup (Artificial Analysis) embedded as a library
   pi_rt.py         pi (badlogic) driven as a subprocess in JSON mode
 fusion/
-  config.py        model IDs + pinned pricing + budget guard settings
-  llm.py           Anthropic wrapper: prompt caching + per-role token/cost ledger
+  config.py        provider/model IDs + pinned pricing + budget settings
+  llm.py           Anthropic/OpenRouter adapters + normalized tools + cost ledger
   workspace.py     per-task working copy: read/search/edit/run-tests + unified diff
   tools.py         tool schemas + dispatcher over a Workspace
   agent.py         generic tool-use loop; one instance = one warm-cache context
   orchestrator.py  solver/scout prompts + Scout delegation wiring
-  policies.py      the three legacy variants (frontier_only / sidekick_only / scout)
+  policies.py      the fusion-loop patterns (frontier_only / sidekick_only / scout / inverted)
 eval/
   tasks.py         native mini-set loader + optional SWE-bench Verified slice
   judge.py         "would you merge?" rubric (0-100 + would_merge)
@@ -94,8 +98,9 @@ scripts/
 
 The agent loop is pluggable. A *runtime* is one harness behind the
 `AgentRuntime` protocol (`runtimes/base.py`); the orchestrator picks a runtime
-and model per variant, and every runtime records usage into the same Ledger at
-the same pinned pricing, so cost numbers stay comparable.
+and model per variant, and every runtime records usage into the same Ledger.
+Anthropic and external runtimes use pinned pricing where available; direct
+OpenRouter calls use the exact billed cost returned in the response.
 
 | variant            | harness                                    | notes |
 |--------------------|--------------------------------------------|-------|
@@ -112,33 +117,76 @@ python -m eval.run_eval --source native \
 Cost-comparability caveats:
 * **Stirrup** reports no cache split, so all its input tokens are billed at the
   full input rate (conservative overestimate), and its litellm path does no
-  prompt caching — expect ~2x fusion's cost on small tasks.
+  prompt caching — expect ~2x fusion's cost on small tasks. OpenRouter routing
+  works for models listed in `fusion.config.PRICING`; an unpriced model fails
+  before the call because Stirrup does not expose OpenRouter's billed-cost field.
 * **pi** self-reports a session cost, but from its bundled model registry,
   which may not know newer model ids. The ledger recomputes from token counts
-  at pinned prices; pi's own figure is kept in
+  at pinned prices when available and otherwise uses pi's reported cost. pi's
+  own figure is kept in
   `score_artifacts.runtime_extra.pi_reported_cost_usd` as a cross-check, and a
   warning is printed when the two deviate >10%.
 * **pi** has no turn-limit flag; the wall-clock cap
   (`RunConfig.runtime_timeout_s`, default 1200s) remains an in-flight guard.
-  Usage is monitored from pi's live JSON event stream so the run stops before
-  another full-context turn could cross the per-cell budget.
+  For pinned models, usage is monitored from pi's live JSON event stream so the
+  run stops before another full-context turn could cross the per-cell budget;
+  unpinned OpenRouter models use pi's provider-reported post-call cost.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt        # anthropic, datasets, matplotlib, stirrup[litellm], (pytest)
-export ANTHROPIC_API_KEY=sk-ant-...     # REQUIRED for any run that calls the API
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt        # Anthropic + OpenRouter/OpenAI clients, eval stack
+
+# Choose one provider/key:
+export ANTHROPIC_API_KEY=sk-ant-...
+# or:
+export OPENROUTER_API_KEY=sk-or-v1-...
 
 # optional, only for the baseline-pi variant:
 npm i -g @mariozechner/pi-coding-agent
 ```
 
 `scripts/benchmark_parallel.py` loads unset values from `.env` and performs a
-free Anthropic credential preflight before either paid benchmark arm. Provider-
-wide failures during a run stop dispatch and leave affected cells resumable.
+free credential preflight before either paid benchmark arm. Provider-wide
+failures during a run stop dispatch and leave affected cells resumable.
 
-> **Prerequisite:** the eval run needs an API key. Building/inspecting the harness and
-> the no-LLM smoke test do not.
+> **Prerequisite:** the eval run needs the key for its selected provider. Building,
+> unit tests, and the no-LLM smoke test do not.
+
+## Providers and models
+
+Anthropic remains the zero-configuration default. Switch the whole run to
+[OpenRouter's OpenAI-compatible API](https://openrouter.ai/docs/guides/community/openai-sdk)
+with CLI flags:
+
+```bash
+python -m eval.run_eval --source native --provider openrouter \
+  --main-model anthropic/claude-sonnet-5 \
+  --sidekick-model anthropic/claude-haiku-4-5 \
+  --judge-provider openrouter --judge-model anthropic/claude-sonnet-5 \
+  --budget 3 --per-task 2.5
+```
+
+Or put the equivalent values in `.env`/the environment:
+
+```bash
+export LLM_PROVIDER=openrouter
+export MODEL_MAIN=anthropic/claude-sonnet-5
+export MODEL_SIDEKICK=anthropic/claude-haiku-4-5
+export JUDGE_PROVIDER=openrouter
+export JUDGE_MODEL=anthropic/claude-sonnet-5
+export OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+`--judge-provider` and `--judge-model` are independent. If omitted, they follow
+the selected main provider/model. Bare Claude ids are automatically qualified as
+`anthropic/<id>` for OpenRouter; other OpenRouter models require their catalog
+prefix. Optional `OPENROUTER_BASE_URL`, `OPENROUTER_SITE_URL`, and
+`OPENROUTER_APP_NAME` configure a compatible endpoint and attribution headers.
+OpenRouter tool calls are normalized into the same internal loop as Anthropic,
+including parallel calls and `role="tool"` result messages.
 
 ## Run
 
@@ -147,10 +195,15 @@ wide failures during a run stop dispatch and leave affected cells resumable.
 python scripts/smoke_workspace.py
 
 # 1) Tier-0 smoke (~$1-2): a couple of tasks, two variants
-python -m eval.run_eval --source native --variants frontier_only scout --budget 3
+python -m eval.run_eval --source native --variants frontier_only scout \
+  --budget 3 --per-task 2.5
 
-# 2) Full native run, all three variants
+# 2) Full native run, all built-in fusion variants
 python -m eval.run_eval --source native --budget 5
+
+# OpenRouter smoke with the default Claude models
+python -m eval.run_eval --source native --limit 1 \
+  --variants frontier_only --provider openrouter --no-judge --budget 1
 
 # 3) CONFIRM SCORING FIRST (cheap) — before spending on a big run, prove the
 #    scoring pipeline is correct and see whether you even need a better harness.
@@ -165,7 +218,7 @@ python -m eval.selftest_scoring --limit 5
 # 4) THE FALSIFYING RUN — frontier_only vs scout on real SWE-bench Verified
 #    tasks, with real FAIL_TO_PASS scoring. Clone locally and run one script
 #    (Cloud/Web sandbox can't: HuggingFace + arbitrary GitHub are network-blocked).
-export ANTHROPIC_API_KEY=sk-ant-...
+# uses LLM_PROVIDER and its matching key from .env/the environment
 ./run_swebench.sh            # 15 instances, $25 cap
 ./run_swebench.sh 10 15      # 10 instances, $15 cap
 
@@ -194,7 +247,7 @@ bare on the box; Docker is only used by the scoring step.
 - **Storage:** root EBS **100–160 GB** (Docker images are large; the 8 GB default
   fills up fast).
 - **Security group / network:** default outbound is fine — it needs to reach
-  Docker Hub, HuggingFace, npm, and the Anthropic API.
+  Docker Hub, HuggingFace, npm, and the selected model provider API.
 
 **Set it up and run:**
 ```bash
@@ -204,7 +257,7 @@ exit                                     # re-login so the docker group applies
 ssh ...                                  # reconnect
 docker run --rm hello-world              # sanity check (no sudo needed)
 
-cp .env.example .env && nano .env        # paste ANTHROPIC_API_KEY
+cp .env.example .env && nano .env        # choose provider and paste its key
 source .venv/bin/activate
 python scripts/smoke_workspace.py                          # $0 sandbox check
 python -m eval.selftest_scoring --backend docker --limit 3 # $0 gold check — 3/3
@@ -247,11 +300,17 @@ New runtime-backed variants use `orchestrator.variants.register_variant(...)`;
 they inherit the scheduler, isolation, budget, timing, and resume contract. Set
 `EVAL_RESULTS_DIR` when artifacts should live on a separate persistent volume.
 
-## Pricing (pinned, standard rates per 1M tokens)
+## Pricing and budget accounting
 
 | model            | input | output | cache write (5m) | cache read |
 |------------------|------:|-------:|-----------------:|-----------:|
-| `claude-sonnet-5`  | $3.00 | $15.00 | $3.75 | $0.30 |
-| `claude-haiku-4-5` | $1.00 |  $5.00 | $1.25 | $0.10 |
+| `anthropic/claude-sonnet-5`  | $3.00 | $15.00 | $3.75 | $0.30 |
+| `anthropic/claude-haiku-4-5` | $1.00 |  $5.00 | $1.25 | $0.10 |
 
-See `fusion/config.py` to adjust models, budgets, or thinking settings.
+Direct OpenRouter completions use the API's `usage.cost` value, so routed models
+with request-, reasoning-, or provider-specific pricing remain budgeted accurately.
+Pinned rates are used for direct Anthropic calls and external runtimes that expose
+only token counts. See `fusion/config.py` to adjust models, pinned prices, budgets,
+or thinking settings. Strict pre-call reservations (including the optional judge)
+require a pinned price; use `--no-judge` for an unpinned direct OpenRouter model,
+or add its rate to `PRICING` before a budget-critical run.

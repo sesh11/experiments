@@ -64,7 +64,12 @@ class Agent:
                 role=self.role, model=self.model, system=self.system,
                 messages=self.messages, tools=self.tools, thinking=self.thinking,
             )
-            self.messages.append({"role": "assistant", "content": resp.content})
+            # Store one provider-neutral transcript shape.  Each adapter converts
+            # these Anthropic-style blocks to its native wire format per call.
+            self.messages.append({
+                "role": "assistant",
+                "content": [block.as_dict() for block in resp.content],
+            })
 
             text_blocks = [b.text for b in resp.content if b.type == "text"]
             if text_blocks:

@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
 from fusion import config
+from fusion.llm import Ledger, LLMClient
 
 _JUDGE_SYSTEM = """You are a senior maintainer doing code review. You are given a bug
 report and a candidate diff. Decide whether you would merge it as-is. Judge:
@@ -20,24 +19,10 @@ correctness (does it actually fix the reported bug), scope (minimal and on-targe
 unrelated churn), and style (fits a clean codebase). Reply with ONLY a JSON object:
 {"score": <0-100 int>, "would_merge": <bool>, "rationale": "<one sentence>"}."""
 
-_SCHEMA = {
-    "type": "json_schema",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "score": {"type": "integer"},
-            "would_merge": {"type": "boolean"},
-            "rationale": {"type": "string"},
-        },
-        "required": ["score", "would_merge", "rationale"],
-        "additionalProperties": False,
-    },
-}
 
 _MAX_PROBLEM_CHARS = 40000
 _MAX_DIFF_CHARS = 40000
 _MAX_OUTPUT_TOKENS = 400
-_MAX_ATTEMPTS = 2  # structured-output request plus the compatibility fallback
 
 
 def _judge_user(task: dict, diff: str, tests_pass: bool) -> str:
@@ -53,55 +38,43 @@ def _judge_user(task: dict, diff: str, tests_pass: bool) -> str:
     )
 
 
-def max_cost_upper_bound(task: dict, diff: str = "", *, worst_case: bool = False) -> float:
+def max_cost_upper_bound(task: dict, cfg: config.RunConfig | None = None,
+                         diff: str = "", *, worst_case: bool = False) -> float:
     """Conservative reservation for the optional judge stage.
 
-    UTF-8 bytes are used as an upper bound on text tokens, and two full calls
-    are reserved because older SDK/provider combinations may need the plain-JSON
-    fallback. This intentionally over-reserves; unused dollars are released.
+    UTF-8 bytes upper-bound tokenizer output for the capped text request. The
+    provider-neutral judge makes one call; unused reserved dollars are released.
     """
+    cfg = cfg or config.RunConfig()
     if worst_case:
         diff = "x" * _MAX_DIFF_CHARS
     user = _judge_user(task, diff, False)
-    input_bound = len((_JUDGE_SYSTEM + user).encode("utf-8"))
-    one_call = config.cost_for(
-        config.JUDGE_MODEL, input_tokens=input_bound,
-        output_tokens=_MAX_OUTPUT_TOKENS,
+    routed_model = config.api_model(cfg.judge_provider, cfg.judge_model)
+    one_call = config.request_cost_upper_bound(
+        routed_model,
+        {"system": _JUDGE_SYSTEM, "messages": [{"role": "user", "content": user}]},
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
     )
-    return round(one_call * _MAX_ATTEMPTS + 0.01, 6)
+    return round(one_call + 0.01, 6)
 
 
-def judge_merge(task: dict, diff: str, tests_pass: bool) -> dict:
+def judge_merge(task: dict, diff: str, tests_pass: bool,
+                cfg: config.RunConfig | None = None) -> dict:
     """Returns {score, would_merge, rationale, cost_usd}."""
-    client = anthropic.Anthropic()
+    cfg = cfg or config.RunConfig()
+    ledger = Ledger(cap_usd=cfg.budget_usd)
+    client = LLMClient.for_run(
+        ledger, cfg, provider=cfg.judge_provider, max_tokens=_MAX_OUTPUT_TOKENS)
     user = _judge_user(task, diff, tests_pass)
-    try:
-        resp = client.messages.create(
-            model=config.JUDGE_MODEL,
-            max_tokens=_MAX_OUTPUT_TOKENS,
-            thinking={"type": "disabled"},
-            system=_JUDGE_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-            output_config={"format": _SCHEMA},
-        )
-    except Exception:
-        # Structured outputs unsupported / call failed → fall back to plain parse.
-        resp = client.messages.create(
-            model=config.JUDGE_MODEL, max_tokens=_MAX_OUTPUT_TOKENS,
-            thinking={"type": "disabled"}, system=_JUDGE_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-        )
-
-    cost = config.cost_for(
-        config.JUDGE_MODEL,
-        input_tokens=resp.usage.input_tokens or 0,
-        output_tokens=resp.usage.output_tokens or 0,
-        cache_write_tokens=getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
-        cache_read_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+    resp = client.complete(
+        role="judge", model=cfg.judge_model,
+        thinking={"type": "disabled"}, system=_JUDGE_SYSTEM,
+        messages=[{"role": "user", "content": user}],
     )
-    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    text = "".join(block.text for block in resp.content
+                   if block.type == "text").strip()
     data = _parse(text)
-    data["cost_usd"] = cost
+    data["cost_usd"] = ledger.total_cost
     return data
 
 
@@ -109,9 +82,10 @@ def _parse(text: str) -> dict:
     try:
         start, end = text.index("{"), text.rindex("}") + 1
         obj = json.loads(text[start:end])
+        score = max(0, min(100, int(obj.get("score", 0))))
         return {
-            "score": int(obj.get("score", 0)),
-            "would_merge": bool(obj.get("would_merge", False)),
+            "score": score,
+            "would_merge": obj.get("would_merge") is True,
             "rationale": str(obj.get("rationale", ""))[:300],
         }
     except Exception:

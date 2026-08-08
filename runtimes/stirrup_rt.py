@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fusion import config
@@ -113,11 +114,30 @@ class StirrupRuntime:
             ledger: Ledger, cfg: config.RunConfig) -> RuntimeResult:
         if _IMPORT_ERROR is not None:
             raise RuntimeUnavailable(str(_IMPORT_ERROR))
-        role = "main" if model == config.MODEL_MAIN else "sidekick"
+        role = "main" if model == cfg.main_model else "sidekick"
+        routed_model = config.api_model(cfg.provider, model)
+        if not config.has_pinned_price(routed_model):
+            raise config.PricingUnavailable(
+                f"Stirrup does not expose OpenRouter's billed-cost field; {routed_model!r} "
+                "needs an entry in fusion.config.PRICING before it can be budgeted"
+            )
+        kwargs = {}
+        api_key = None
+        if cfg.provider == "openrouter":
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            headers = {}
+            if cfg.openrouter_site_url:
+                headers["HTTP-Referer"] = cfg.openrouter_site_url
+            if cfg.openrouter_app_name:
+                headers["X-OpenRouter-Title"] = cfg.openrouter_app_name
+            kwargs["api_base"] = cfg.openrouter_base_url
+            if headers:
+                kwargs["extra_headers"] = headers
         client = LedgerLiteLLMClient(
-            model=f"anthropic/{model}", ledger=ledger, role=role,
-            pricing_model=model, max_output_tokens=cfg.max_tokens,
-            max_tokens=cfg.max_tokens,
+            model=config.litellm_model(cfg.provider, model),
+            ledger=ledger, role=role, pricing_model=routed_model,
+            api_key=api_key, kwargs=kwargs,
+            max_output_tokens=cfg.max_tokens, max_tokens=cfg.max_tokens,
         )
         return asyncio.run(self._arun(task, ws, client, cfg))
 

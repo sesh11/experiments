@@ -408,6 +408,18 @@ def test_benchmark_anthropic_preflight_rejects_placeholder_and_401(monkeypatch):
             _preflight_anthropic()
 
 
+def test_benchmark_preflights_selected_main_and_judge_providers() -> None:
+    args = SimpleNamespace(
+        provider="openrouter", judge_provider="anthropic", with_judge=True,
+        openrouter_base_url="https://gateway.example/v1",
+    )
+    with (patch.object(benchmark_parallel, "_preflight_anthropic") as anthropic,
+          patch.object(benchmark_parallel, "_preflight_openrouter") as openrouter):
+        benchmark_parallel._preflight_selected_providers(args)
+    anthropic.assert_called_once_with()
+    openrouter.assert_called_once_with("https://gateway.example/v1")
+
+
 def test_global_budget_reservations_prevent_overdispatch(tmp_path):
     tasks = _tasks(8)
     store, log, _ = _store(tmp_path, tasks, budget=1.0)
@@ -457,6 +469,48 @@ def test_judge_cost_is_reserved_and_counted_in_global_budget(tmp_path):
     assert summary.spent_usd == pytest.approx(0.7)
     assert all(p["row"]["judge_cost_usd"] == 0.1
                for p in store.completed_payloads())
+
+
+def test_parallel_judge_uses_the_persisted_cell_provider_config(tmp_path):
+    cell_config = {
+        **RUN_CONFIG,
+        "provider": "openrouter",
+        "main_model": "anthropic/claude-sonnet-5",
+        "sidekick_model": "anthropic/claude-haiku-4-5",
+        "judge_provider": "openrouter",
+        "judge_model": "anthropic/claude-sonnet-5",
+    }
+    store, log, _ = _store(
+        tmp_path, _tasks(1),
+        configs=[{"name": "openrouter", "run_config": cell_config}],
+        budget=2.0,
+    )
+    seen = {}
+
+    def reserve(task, cfg, **kwargs):
+        seen["reservation"] = cfg
+        return 0.1
+
+    def score(task, diff, resolved, cfg):
+        seen["scoring"] = cfg
+        return {"score": 90, "would_merge": True,
+                "rationale": "ok", "cost_usd": 0.02}
+
+    with (patch("eval.parallel.variants.run_variant",
+                side_effect=lambda variant, task, cfg: _result(variant, 0.1)),
+          patch("eval.parallel.judge.max_cost_upper_bound", side_effect=reserve),
+          patch("eval.parallel.judge.judge_merge", side_effect=score)):
+        summary = run_cells(
+            store=store, tasks=_tasks(1), workers=1, docker_workers=1,
+            budget_usd=2.0, per_task_usd=0.5, no_judge=False,
+            audit_log=log, on_persist=lambda: None, progress_interval=0,
+        )
+
+    assert summary.counts == {"completed": 1}
+    assert seen["reservation"].judge_provider == "openrouter"
+    assert seen["reservation"].judge_model == "anthropic/claude-sonnet-5"
+    assert seen["scoring"].judge_provider == "openrouter"
+    assert seen["scoring"].openrouter_base_url == fusion_config.OPENROUTER_BASE_URL
 
 
 def test_docker_scoring_has_its_own_concurrency_bound_and_unique_artifacts(tmp_path):

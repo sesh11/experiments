@@ -147,34 +147,41 @@ class VariantSpec:
     confidence-gated routing plug in after the parity milestone.
     """
     runtime_factory: Callable[[], AgentRuntime]
-    main_model: str
+    model_role: str = "main"
+    # Backwards-compatible fixed-model override for external registrations.
+    main_model: str | None = None
     sidekick_model: str | None = None
     pattern: str = "single_agent"
 
 
 _REGISTRY: dict[str, VariantSpec] = {
-    "baseline-fusion": VariantSpec(_fusion_runtime, config.MODEL_MAIN),
-    "baseline-stirrup": VariantSpec(_stirrup_runtime, config.MODEL_MAIN),
-    "baseline-pi": VariantSpec(_pi_runtime, config.MODEL_MAIN),
+    "baseline-fusion": VariantSpec(_fusion_runtime),
+    "baseline-stirrup": VariantSpec(_stirrup_runtime),
+    "baseline-pi": VariantSpec(_pi_runtime),
 }
 
 _LEGACY = ("frontier_only", "sidekick_only", "scout")
+# New orchestrator patterns that run on the same fusion loop (dual persistent
+# contexts) and are toggled by name via --variants. `inverted` = Haiku plans and
+# locates, Sonnet authors the edit from the brief.
+_FUSION_PATTERNS = _LEGACY + ("inverted",)
 
-# Legacy defaults preserved so a bare `python -m eval.run_eval` is unchanged.
-ALL_VARIANTS: list[str] = list(_LEGACY)
+# Default set for a bare `python -m eval.run_eval`: the three baselines plus the
+# new patterns, so each toggle is compared against frontier_only / sidekick_only.
+ALL_VARIANTS: list[str] = list(_FUSION_PATTERNS)
 
 
 def registered_variants() -> list[str]:
     """All schedulable names; the parallel driver stays registry-driven."""
-    return [*_LEGACY, *_REGISTRY]
+    return [*_FUSION_PATTERNS, *_REGISTRY]
 
 
 def register_variant(name: str, spec: VariantSpec, *, replace: bool = False) -> None:
     """Register a runtime-backed experiment variant before building a run matrix."""
     if not name or name.strip() != name or any(char.isspace() for char in name):
         raise ValueError("variant name must be non-empty and contain no whitespace")
-    if name in _LEGACY:
-        raise ValueError(f"cannot replace built-in legacy variant: {name}")
+    if name in _FUSION_PATTERNS:
+        raise ValueError(f"cannot replace built-in legacy/fusion variant: {name}")
     if name in _REGISTRY and not replace:
         raise ValueError(f"variant already registered: {name}")
     if not isinstance(spec, VariantSpec):
@@ -184,7 +191,7 @@ def register_variant(name: str, spec: VariantSpec, *, replace: bool = False) -> 
 
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     """Run one variant on one task; never raises for an unavailable runtime."""
-    if name in _LEGACY:
+    if name in _FUSION_PATTERNS:
         from fusion import policies
         return policies.run_variant(name, task, cfg)
     spec = _REGISTRY.get(name)
@@ -196,5 +203,6 @@ def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
         return PolicyResult(variant=name, resolved=False, diff="", summary="",
                             ledger=Ledger(cap_usd=cfg.budget_usd).summary(),
                             error=f"runtime unavailable: {exc}")
-    return single_agent(task, cfg, variant=name, runtime=runtime,
-                        model=spec.main_model)
+    model = (spec.main_model or
+             (cfg.main_model if spec.model_role == "main" else cfg.sidekick_model))
+    return single_agent(task, cfg, variant=name, runtime=runtime, model=model)
