@@ -10,6 +10,7 @@ write costs ~1.25x base input and a cache read costs ~0.1x base input.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 # --- Model identifiers ------------------------------------------------------
@@ -45,6 +46,28 @@ def cost_for(model: str, *, input_tokens: int, output_tokens: int,
     )
 
 
+def request_cost_upper_bound(model: str, payload: object, *,
+                             max_output_tokens: int) -> float:
+    """Conservative pre-call cost bound for JSON/text model requests.
+
+    UTF-8 bytes upper-bound tokenizer output for these text-only requests. All
+    input is priced at the more expensive of normal input and cache creation so
+    a call can be rejected before it would cross a hard per-cell reservation.
+    """
+    encoded = json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8")
+    p = PRICING[_normalize(model)]
+    return (len(encoded) / 1e6 * max(p.input, p.cache_write_5m)
+            + max_output_tokens / 1e6 * p.output)
+
+
+def absolute_request_cost_upper_bound(model: str, *, max_output_tokens: int,
+                                      max_input_tokens: int = 200_000) -> float:
+    """Provider-independent ceiling for one text request at full context."""
+    p = PRICING[_normalize(model)]
+    return (max_input_tokens / 1e6 * max(p.input, p.cache_write_5m)
+            + max_output_tokens / 1e6 * p.output)
+
+
 def _normalize(model: str) -> str:
     """Map dated/aliased/provider-prefixed IDs onto a pricing key.
 
@@ -64,7 +87,7 @@ def _normalize(model: str) -> str:
 @dataclass
 class RunConfig:
     budget_usd: float = 25.0            # hard ceiling for a whole run
-    per_task_usd: float = 3.0           # soft ceiling per (variant, task)
+    per_task_usd: float = 3.0           # hard reservation per execution cell
     max_tokens: int = 8192              # per model response (non-streaming safe)
     max_steps: int = 14                 # tool-use loop steps per agent
     scout_max_steps: int = 10           # steps for a read-only scout delegation
@@ -72,6 +95,5 @@ class RunConfig:
     # (Haiku 4.5 has no adaptive mode; we omit the field there.)
     main_thinking: dict | None = field(default_factory=lambda: {"type": "disabled"})
     sidekick_thinking: dict | None = None
-    # Wall-clock cap for subprocess runtimes (pi); their budget is only
-    # accounted post-hoc, so time is the in-flight guard.
+    # Wall-clock cap for subprocess runtimes (pi also live-meters its budget).
     runtime_timeout_s: int = 1200

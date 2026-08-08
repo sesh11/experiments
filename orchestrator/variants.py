@@ -164,6 +164,11 @@ _LEGACY = ("frontier_only", "sidekick_only", "scout")
 ALL_VARIANTS: list[str] = list(_LEGACY)
 
 
+def registered_variants() -> list[str]:
+    """All schedulable names; the parallel driver stays registry-driven."""
+    return [*_LEGACY, *_REGISTRY]
+
+
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     """Run one variant on one task; never raises for an unavailable runtime."""
     if name in _LEGACY:

@@ -79,7 +79,11 @@ fusion/
 eval/
   tasks.py         native mini-set loader + optional SWE-bench Verified slice
   judge.py         "would you merge?" rubric (0-100 + would_merge)
-  run_eval.py      driver: variants × tasks, global + per-task budget caps
+  run_eval.py      CLI + experiment/configuration matrix construction
+  parallel.py      bounded agent/scoring pipeline + global reservations
+  run_state.py     stable cell identities, atomic manifest, resume journal
+  isolation.py     private local clone per concurrent SWE-bench cell
+  resources.py     EC2 CPU/RAM/disk-aware automatic worker sizing
   report.py        results/pareto.png + per-variant table
 scripts/
   smoke_workspace.py   no-LLM check of the workspace/test loop
@@ -114,8 +118,9 @@ Cost-comparability caveats:
   `score_artifacts.runtime_extra.pi_reported_cost_usd` as a cross-check, and a
   warning is printed when the two deviate >10%.
 * **pi** has no turn-limit flag; the wall-clock cap
-  (`RunConfig.runtime_timeout_s`, default 1200s) is the in-flight guard and its
-  usage is accounted post-hoc at session end.
+  (`RunConfig.runtime_timeout_s`, default 1200s) remains an in-flight guard.
+  Usage is monitored from pi's live JSON event stream so the run stops before
+  another full-context turn could cross the per-cell budget.
 
 ## Setup
 
@@ -158,6 +163,12 @@ python -m eval.selftest_scoring --limit 5
 export ANTHROPIC_API_KEY=sk-ant-...
 ./run_swebench.sh            # 15 instances, $25 cap
 ./run_swebench.sh 10 15      # 10 instances, $15 cap
+
+# Resource-aware parallelism is automatic. Override or force serial execution:
+python -m eval.run_eval --source swebench --backend docker --limit 10 \
+  --variants frontier_only scout --budget 25 --no-judge \
+  --workers auto --docker-workers auto
+# add: --workers 1 --docker-workers 1   # serial compatibility mode
 
 # Report
 python -m eval.report          # -> results/pareto.png + table
@@ -213,8 +224,16 @@ with test-file flagging, and the **actual pytest output** from scoring. Start
 with `why:`, open the `.log` when you need the evidence.
 
 Budget is enforced two ways: a **global** `--budget` cap across the whole run and a
-**per-task** cap (`--per-task`, default $3). When the budget is exhausted the run stops
-and writes whatever it has to `results/`.
+**per-cell agent** cap (`--per-task`, default $3; the flag name is retained for
+compatibility). Cells reserve their allowance before dispatch. When the budget is
+exhausted, undispatched cells remain recorded in the run manifest.
+
+Runs are parallel and resumable. Each `(SWE-bench instance, variant,
+configuration, repetition)` is an isolated cell; automatic worker sizing adapts
+to EC2 CPU/RAM/disk, while Docker scoring has its own lower concurrency bound.
+Every run prints `python -m eval.run_eval --resume <run-id>`. See
+[docs/PARALLEL_EVAL.md](docs/PARALLEL_EVAL.md) for configuration matrices,
+budget reservations, artifacts, interruption behavior, and benchmarking.
 
 ## Pricing (pinned, standard rates per 1M tokens)
 

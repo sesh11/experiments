@@ -67,14 +67,24 @@ class Ledger:
                 f"budget cap ${self.cap_usd:.2f} exceeded (spent ${self.total_cost:.2f})"
             )
 
+    def ensure_capacity(self, maximum_cost_usd: float) -> None:
+        """Reject a request before billing if its worst case exceeds the cap."""
+        if self.total_cost + maximum_cost_usd > self.cap_usd:
+            raise BudgetExceeded(
+                f"next call could exceed budget cap ${self.cap_usd:.2f} "
+                f"(spent ${self.total_cost:.2f}, needs up to ${maximum_cost_usd:.2f})"
+            )
+
     @property
     def total_cost(self) -> float:
         return sum(r.cost_usd for r in self.by_role.values())
 
     def summary(self) -> dict:
-        out = {"total_cost_usd": round(self.total_cost, 4)}
+        # Keep exact floats for cross-cell budget settlement; presentation
+        # layers round independently.
+        out = {"total_cost_usd": self.total_cost}
         for role, r in self.by_role.items():
-            out[f"{role}_cost_usd"] = round(r.cost_usd, 4)
+            out[f"{role}_cost_usd"] = r.cost_usd
             out[f"{role}_input_tokens"] = r.input_tokens
             out[f"{role}_output_tokens"] = r.output_tokens
             out[f"{role}_cache_read_tokens"] = r.cache_read_tokens
@@ -105,6 +115,8 @@ class LLMClient:
             kwargs["tools"] = tools
         if thinking is not None:
             kwargs["thinking"] = thinking
+        self.ledger.ensure_capacity(config.request_cost_upper_bound(
+            model, kwargs, max_output_tokens=self.max_tokens))
         resp = self._client.messages.create(**kwargs)
         self.ledger.record(role, model, resp.usage)
         return resp

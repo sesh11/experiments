@@ -19,6 +19,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from .run_state import atomic_write_text
+
 # Path fragments that mean "this is a test file" — edits here are discarded by
 # SWE-bench scoring, so touching them is almost always an agent mistake.
 _TEST_RE = re.compile(r"(^|/)(tests?|testing)/|(^|/)(test_|conftest)|_test\.py")
@@ -57,16 +59,17 @@ def _fmt_trace(trace: list, indent: str = "  ") -> str:
 
 
 class Audit:
-    def __init__(self, out_dir: str | Path = "results"):
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    def __init__(self, out_dir: str | Path = "results", *, run_id: str | None = None):
+        stamp = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.dir = Path(out_dir) / "runs" / stamp
         self.dir.mkdir(parents=True, exist_ok=True)
         self.jsonl = self.dir / "runs.jsonl"
         self.count = 0
 
     def record(self, *, task: dict, variant: str, res, quality, would_merge,
-               remaining_before: float) -> str:
-        """Write the full per-run log + JSONL row; return a terminal summary."""
+               remaining_before: float, cell_id: str | None = None,
+               cell_meta: dict | None = None) -> tuple[str, dict]:
+        """Atomically write a full log; return terminal text + JSONL record."""
         self.count += 1
         files = _diff_files(res.diff or "")
         test_files = _touched_tests(files)
@@ -74,7 +77,7 @@ class Audit:
         iid = task["instance_id"]
 
         # --- full detail log file ------------------------------------------
-        log_path = self.dir / f"{iid}__{variant}.log"
+        log_path = self.dir / f"{cell_id or f'{iid}__{variant}'}.log"
         parts: list[str] = []
         parts.append(f"=== {iid} :: {variant} ===")
         parts.append(f"resolved: {res.resolved}   detail: {res.resolve_detail}")
@@ -126,7 +129,7 @@ class Audit:
             parts.append(f"PASS_TO_PASS sample (rc={art.get('p2p_rc')}, "
                          f"n={art.get('p2p_n')})")
             parts.append(art.get("p2p_output", ""))
-        log_path.write_text("\n".join(parts))
+        atomic_write_text(log_path, "\n".join(parts) + "\n")
 
         # --- structured JSONL row ------------------------------------------
         row = {
@@ -141,11 +144,18 @@ class Audit:
             "sidekick_cost_usd": res.ledger.get("sidekick_cost_usd", 0),
             "score_artifacts": art, "log_file": str(log_path),
         }
-        with self.jsonl.open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
+        if cell_meta:
+            row.update(cell_meta)
 
-        return self._terminal(iid, variant, res, files, test_files, art,
-                              quality, remaining_before, log_path)
+        return (self._terminal(iid, variant, res, files, test_files, art,
+                               quality, remaining_before, log_path), row)
+
+    def rebuild_jsonl(self, payloads: list[dict]) -> None:
+        """Rebuild the machine audit in deterministic cell order."""
+        lines = [json.dumps(p["audit_row"], sort_keys=True)
+                 for p in sorted(payloads, key=lambda p: p["index"])
+                 if p.get("audit_row")]
+        atomic_write_text(self.jsonl, "\n".join(lines) + ("\n" if lines else ""))
 
     def _terminal(self, iid, variant, res, files, test_files, art,
                   quality, remaining_before, log_path) -> str:

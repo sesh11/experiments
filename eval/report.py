@@ -2,8 +2,8 @@
 
     python -m eval.report
 
-Produces results/pareto.png and prints a per-variant summary: resolve rate,
-mean quality, mean cost, and the main/sidekick token split.
+Produces results/pareto.png and prints a per-variant/configuration summary:
+resolve rate, mean quality, mean total cell cost, and main/sidekick split.
 """
 
 from __future__ import annotations
@@ -25,13 +25,16 @@ def load_rows() -> list[dict]:
 def aggregate(rows: list[dict]) -> dict[str, dict]:
     by = defaultdict(list)
     for r in rows:
-        by[r["variant"]].append(r)
+        label = r["variant"]
+        if r.get("config", "default") != "default":
+            label = f"{label}/{r['config']}"
+        by[label].append(r)
     agg = {}
     for variant, rs in by.items():
         n = len(rs)
         resolved = sum(1 for r in rs if r.get("resolved")) / n
         quals = [r["quality"] for r in rs if r.get("quality") is not None]
-        cost = sum(r.get("run_cost_usd", 0) for r in rs) / n
+        cost = sum(r.get("cell_cost_usd", r.get("run_cost_usd", 0)) for r in rs) / n
         main = sum(r.get("main_cost_usd", 0) for r in rs)
         side = sum(r.get("sidekick_cost_usd", 0) for r in rs)
         agg[variant] = {
@@ -46,11 +49,12 @@ def aggregate(rows: list[dict]) -> dict[str, dict]:
 
 
 def print_table(agg: dict[str, dict]) -> None:
-    print(f"\n{'variant':<16}{'n':>3}{'resolve':>9}{'quality':>9}"
+    width = max(16, *(len(label) + 2 for label in agg)) if agg else 16
+    print(f"\n{'variant/config':<{width}}{'n':>3}{'resolve':>9}{'quality':>9}"
           f"{'$/task':>9}{'main$':>9}{'side$':>9}")
-    print("-" * 64)
+    print("-" * (width + 48))
     for variant, a in agg.items():
-        print(f"{variant:<16}{a['n']:>3}{a['resolve_rate']:>9.0%}"
+        print(f"{variant:<{width}}{a['n']:>3}{a['resolve_rate']:>9.0%}"
               f"{a['mean_quality']:>9.1f}{a['mean_cost']:>9.4f}"
               f"{a['main_cost']:>9.4f}{a['sidekick_cost']:>9.4f}")
 
