@@ -158,6 +158,15 @@ Root-level `results/summary.json` and `.csv` remain compatibility copies for
 the existing report command. Summaries and `runs.jsonl` are always rebuilt in
 cell-index order, independent of completion order.
 
+Set `EVAL_RESULTS_DIR` to isolate artifacts or place them on a persistent EC2
+volume. The evaluator, report command, and benchmark subprocesses all honor the
+same value:
+
+```bash
+export EVAL_RESULTS_DIR=/mnt/eval-results
+python scripts/benchmark_parallel.py ...
+```
+
 ## Configuration matrices and repetitions
 
 Use `--configs-file` to cross every task/variant with multiple `RunConfig`
@@ -187,6 +196,27 @@ python -m eval.run_eval --source swebench --backend docker \
 Repetition `n` records seed `--seed + n`. The seed is included in cell identity
 and exposed to runtimes through `task["seed"]`; provider determinism still
 depends on the runtime/model API.
+
+## Registering another runtime
+
+Runtime-backed variants register through one public contract before the run
+matrix is constructed:
+
+```python
+from orchestrator.variants import VariantSpec, register_variant
+
+register_variant(
+    "my-runtime",
+    VariantSpec(runtime_factory=MyRuntime, main_model="my-model-id"),
+)
+```
+
+`MyRuntime` implements the `AgentRuntime` protocol in `runtimes/base.py`.
+Registration automatically routes its cells through the same configuration
+matrix, repetitions/seeds, private checkout isolation, global/per-cell budget
+reservations, worker pools, timing capture, atomic results, and resume journal.
+Names must be unique and contain no whitespace; registration must finish before
+calling the evaluator.
 
 ## Real serial-versus-parallel benchmark
 

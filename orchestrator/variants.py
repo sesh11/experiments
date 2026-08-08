@@ -169,6 +169,19 @@ def registered_variants() -> list[str]:
     return [*_LEGACY, *_REGISTRY]
 
 
+def register_variant(name: str, spec: VariantSpec, *, replace: bool = False) -> None:
+    """Register a runtime-backed experiment variant before building a run matrix."""
+    if not name or name.strip() != name or any(char.isspace() for char in name):
+        raise ValueError("variant name must be non-empty and contain no whitespace")
+    if name in _LEGACY:
+        raise ValueError(f"cannot replace built-in legacy variant: {name}")
+    if name in _REGISTRY and not replace:
+        raise ValueError(f"variant already registered: {name}")
+    if not isinstance(spec, VariantSpec):
+        raise TypeError("spec must be a VariantSpec")
+    _REGISTRY[name] = spec
+
+
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     """Run one variant on one task; never raises for an unavailable runtime."""
     if name in _LEGACY:

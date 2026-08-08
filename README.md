@@ -243,6 +243,10 @@ p50/p95 timing in `timing_summary.json`. It also prints
 [docs/PARALLEL_EVAL.md](docs/PARALLEL_EVAL.md) for configuration matrices,
 budget reservations, timing-based tuning, interruption behavior, and benchmarking.
 
+New runtime-backed variants use `orchestrator.variants.register_variant(...)`;
+they inherit the scheduler, isolation, budget, timing, and resume contract. Set
+`EVAL_RESULTS_DIR` when artifacts should live on a separate persistent volume.
+
 ## Pricing (pinned, standard rates per 1M tokens)
 
 | model            | input | output | cache write (5m) | cache read |

@@ -28,6 +28,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
+def _results_dir() -> Path:
+    return Path(os.environ.get("EVAL_RESULTS_DIR", "results")).expanduser()
+
+
 def _load_local_env() -> None:
     """Load simple KEY=VALUE entries from the repository .env when unset."""
     path = _REPO_ROOT / ".env"
@@ -118,7 +122,7 @@ def _invoke(run_id: str, args, *, workers: str, docker_workers: str) -> tuple[fl
     elapsed = time.monotonic() - started
     if proc.returncode:
         raise SystemExit(f"benchmark arm '{run_id}' failed with exit {proc.returncode}")
-    return elapsed, Path("results") / "runs" / run_id
+    return elapsed, _results_dir() / "runs" / run_id
 
 
 def _rows(run_dir: Path) -> list[dict]:
@@ -197,7 +201,7 @@ def _verify_scoring_parity(serial_dir: Path, *, stamp: str,
     from eval import docker_score, swebench_env
 
     payloads = _cell_payloads(serial_dir)
-    out_dir = Path("results") / f"benchmark_{stamp}_scoring_parity"
+    out_dir = _results_dir() / f"benchmark_{stamp}_scoring_parity"
     out_dir.mkdir(parents=True, exist_ok=True)
     locks_guard = threading.Lock()
     locks: dict[str, threading.Lock] = {}
@@ -268,6 +272,9 @@ def main() -> None:
     args.instance_ids_file = str(Path(args.instance_ids_file).expanduser().resolve())
     if args.configs_file:
         args.configs_file = str(Path(args.configs_file).expanduser().resolve())
+    if os.environ.get("EVAL_RESULTS_DIR"):
+        os.environ["EVAL_RESULTS_DIR"] = str(
+            Path(os.environ["EVAL_RESULTS_DIR"]).expanduser().resolve())
     os.chdir(_REPO_ROOT)
     _load_local_env()
     _preflight_anthropic()
@@ -343,7 +350,7 @@ def main() -> None:
         "parallel_setup_overhead_seconds": round(
             max(0.0, parallel_s - parallel_scheduler_s), 2),
     }
-    report_path = Path("results") / f"benchmark_{stamp}.json"
+    report_path = _results_dir() / f"benchmark_{stamp}.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     print(f"\nBenchmark report: {report_path}")

@@ -11,6 +11,7 @@ import argparse
 import csv
 import io
 import json
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ from .run_state import (RunStore, atomic_write_json, atomic_write_text,
                         build_cells, new_run_id, resolve_manifest, run_lease)
 from .timing import format_duration, summarize_timing
 
-_OUT = Path("results")
+_OUT = Path(os.environ.get("EVAL_RESULTS_DIR", "results")).expanduser()
 _CONFIG_FIELDS = set(asdict(config.RunConfig())) - {"budget_usd", "per_task_usd"}
 
 

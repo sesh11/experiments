@@ -9,10 +9,11 @@ resolve rate, mean quality, mean total cell cost, and main/sidekick split.
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
-_OUT = Path("results")
+_OUT = Path(os.environ.get("EVAL_RESULTS_DIR", "results")).expanduser()
 
 
 def load_rows() -> list[dict]:
