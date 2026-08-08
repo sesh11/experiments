@@ -148,6 +148,8 @@ class VariantSpec:
     """
     runtime_factory: Callable[[], AgentRuntime]
     model_role: str = "main"
+    # Backwards-compatible fixed-model override for external registrations.
+    main_model: str | None = None
     sidekick_model: str | None = None
     pattern: str = "single_agent"
 
@@ -169,6 +171,24 @@ _FUSION_PATTERNS = _LEGACY + ("inverted",)
 ALL_VARIANTS: list[str] = list(_FUSION_PATTERNS)
 
 
+def registered_variants() -> list[str]:
+    """All schedulable names; the parallel driver stays registry-driven."""
+    return [*_FUSION_PATTERNS, *_REGISTRY]
+
+
+def register_variant(name: str, spec: VariantSpec, *, replace: bool = False) -> None:
+    """Register a runtime-backed experiment variant before building a run matrix."""
+    if not name or name.strip() != name or any(char.isspace() for char in name):
+        raise ValueError("variant name must be non-empty and contain no whitespace")
+    if name in _FUSION_PATTERNS:
+        raise ValueError(f"cannot replace built-in legacy/fusion variant: {name}")
+    if name in _REGISTRY and not replace:
+        raise ValueError(f"variant already registered: {name}")
+    if not isinstance(spec, VariantSpec):
+        raise TypeError("spec must be a VariantSpec")
+    _REGISTRY[name] = spec
+
+
 def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
     """Run one variant on one task; never raises for an unavailable runtime."""
     if name in _FUSION_PATTERNS:
@@ -183,5 +203,6 @@ def run_variant(name: str, task: dict, cfg: config.RunConfig) -> PolicyResult:
         return PolicyResult(variant=name, resolved=False, diff="", summary="",
                             ledger=Ledger(cap_usd=cfg.budget_usd).summary(),
                             error=f"runtime unavailable: {exc}")
-    model = cfg.main_model if spec.model_role == "main" else cfg.sidekick_model
+    model = (spec.main_model or
+             (cfg.main_model if spec.model_role == "main" else cfg.sidekick_model))
     return single_agent(task, cfg, variant=name, runtime=runtime, model=model)

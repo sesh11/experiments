@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from fusion import config
-from eval.run_eval import _config_from_args, build_parser
+from eval.run_eval import (_cli_config_overrides, _config_from_args,
+                           _load_configurations, build_parser)
 from eval import tasks
 
 
@@ -73,6 +74,24 @@ def test_cli_provider_selection_flows_to_models_and_judge(monkeypatch) -> None:
     assert cfg.sidekick_model == "google/gemini-3-flash"
     assert cfg.judge_provider == "openrouter"
     assert cfg.judge_model == "openai/gpt-5"
+
+
+def test_cli_provider_selection_is_persisted_in_parallel_cells() -> None:
+    args = build_parser().parse_args([
+        "--provider", "openrouter",
+        "--main-model", "openai/gpt-5",
+        "--sidekick-model", "google/gemini-3-flash",
+        "--openrouter-base-url", "https://gateway.example/v1",
+    ])
+    configurations = _load_configurations(
+        None, None, _cli_config_overrides(args))
+    cell = configurations[0]["run_config"]
+    assert cell["provider"] == "openrouter"
+    assert cell["main_model"] == "openai/gpt-5"
+    assert cell["sidekick_model"] == "google/gemini-3-flash"
+    assert cell["judge_provider"] == "openrouter"
+    assert cell["judge_model"] == "openai/gpt-5"
+    assert cell["openrouter_base_url"] == "https://gateway.example/v1"
 
 
 def test_native_tasks_use_the_active_python_interpreter() -> None:

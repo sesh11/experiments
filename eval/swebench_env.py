@@ -22,6 +22,7 @@ invocations, then revert the patch.
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 import subprocess
@@ -57,8 +58,9 @@ SPLIT = "test"
 _KEEP = ["-e", ".venv", "-e", ".ready", "-e", "*.egg-info"]
 
 
-def _run(cmd, cwd=None, timeout=900):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def _run(cmd, cwd=None, timeout=900, env=None):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                          timeout=timeout, env=env)
 
 
 def _pick_python() -> str:
@@ -112,8 +114,13 @@ def _apply_gold(d: Path, test_patch: str, base_commit: str):
 
 
 def _pytest(venv_py: str, d: Path, ids: list[str], timeout=TEST_TIMEOUT):
+    env = os.environ.copy()
+    local_paths = f"{d}{os.pathsep}{d / 'src'}"
+    env["PYTHONPATH"] = (local_paths + os.pathsep + env["PYTHONPATH"]
+                         if env.get("PYTHONPATH") else local_paths)
     return _run([venv_py, "-m", "pytest", "-q", "--no-header",
-                 "-p", "no:cacheprovider", *ids], cwd=d, timeout=timeout)
+                 "-p", "no:cacheprovider", *ids], cwd=d, timeout=timeout,
+                env=env)
 
 
 def _pytest_digest(proc, max_chars: int = 1200) -> str:

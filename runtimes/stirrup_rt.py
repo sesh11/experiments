@@ -57,15 +57,20 @@ class LedgerLiteLLMClient(LiteLLMClient):
     """
 
     def __init__(self, *, model: str, ledger: Ledger, role: str,
-                 pricing_model: str, **kwargs) -> None:
+                 pricing_model: str, max_output_tokens: int, **kwargs) -> None:
         super().__init__(model=model, **kwargs)
         self._ledger = ledger
         self._role = role
         self._pricing_model = pricing_model
+        self._max_output_tokens = max_output_tokens
         self.calls = 0
 
     async def generate(self, messages: list["ChatMessage"],
                        tools: dict[str, "Tool"]) -> "AssistantMessage":
+        self._ledger.ensure_capacity(config.request_cost_upper_bound(
+            self._pricing_model, {"messages": messages, "tools": tools},
+            max_output_tokens=self._max_output_tokens,
+        ))
         msg = await super().generate(messages, tools)
         self.calls += 1
         u = msg.token_usage
@@ -132,6 +137,7 @@ class StirrupRuntime:
             model=config.litellm_model(cfg.provider, model),
             ledger=ledger, role=role, pricing_model=routed_model,
             api_key=api_key, kwargs=kwargs,
+            max_output_tokens=cfg.max_tokens, max_tokens=cfg.max_tokens,
         )
         return asyncio.run(self._arun(task, ws, client, cfg))
 

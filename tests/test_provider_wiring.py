@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -97,12 +98,26 @@ def test_stirrup_refuses_unpriced_model_before_spending(monkeypatch, tmp_path) -
 def test_pi_passes_openrouter_provider_and_model(monkeypatch, tmp_path) -> None:
     captured = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    class FakeProcess:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.stdout = io.StringIO("")
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def terminate(self):
+            self.returncode = -15
 
     monkeypatch.setattr(pi_rt, "_find_pi", lambda: "/bin/pi")
-    monkeypatch.setattr(pi_rt.subprocess, "run", fake_run)
+    monkeypatch.setattr(pi_rt.subprocess, "Popen", FakeProcess)
     cfg = config.RunConfig(
         provider="openrouter", main_model="anthropic/claude-sonnet-5")
     pi_rt.PiRuntime().run(

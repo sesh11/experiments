@@ -8,6 +8,7 @@ Pinned prices remain the fallback for Anthropic and external runtimes.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -143,6 +144,28 @@ def cost_for(model: str, *, input_tokens: int, output_tokens: int,
     )
 
 
+def request_cost_upper_bound(model: str, payload: object, *,
+                             max_output_tokens: int) -> float:
+    """Conservative pre-call cost bound for JSON/text model requests.
+
+    UTF-8 bytes upper-bound tokenizer output for these text-only requests. All
+    input is priced at the more expensive of normal input and cache creation so
+    a call can be rejected before it would cross a hard per-cell reservation.
+    """
+    encoded = json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8")
+    p = price_for(model)
+    return (len(encoded) / 1e6 * max(p.input, p.cache_write_5m)
+            + max_output_tokens / 1e6 * p.output)
+
+
+def absolute_request_cost_upper_bound(model: str, *, max_output_tokens: int,
+                                      max_input_tokens: int = 200_000) -> float:
+    """Provider-independent ceiling for one text request at full context."""
+    p = price_for(model)
+    return (max_input_tokens / 1e6 * max(p.input, p.cache_write_5m)
+            + max_output_tokens / 1e6 * p.output)
+
+
 # Backwards-compatible private name used by older callers/tests.
 _normalize = pricing_key
 
@@ -167,6 +190,7 @@ class RunConfig:
     # Suppress adaptive thinking by default to keep cost predictable.
     main_thinking: dict | None = field(default_factory=lambda: {"type": "disabled"})
     sidekick_thinking: dict | None = None
+    # Wall-clock cap for subprocess runtimes (pi also live-meters its budget).
     runtime_timeout_s: int = 1200
 
     def __post_init__(self) -> None:

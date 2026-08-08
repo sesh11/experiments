@@ -6,6 +6,7 @@ Two workflows ship in `.github/workflows/`:
 |----------|---------|---------|------|--------------|
 | `ci.yml`   | every push / PR | GitHub-hosted | free | byte-compile + no-LLM smoke test |
 | `eval.yml` | manual button   | **your EC2** (self-hosted) | LLM + EC2 time | the real gold check / agent comparison |
+| `benchmark.yml` | manual button | **your EC2** (self-hosted) | **2× entered per-arm cap** | gold-verifies one slice, then compares serial and auto-parallel execution |
 
 `ci` needs no setup — it runs automatically and keeps the harness honest.
 `eval` needs the three one-time steps below.
@@ -76,7 +77,22 @@ Actions → **eval** → **Run workflow**, choose:
 When it finishes:
 - the **Summary** shows the per-run table (for budget > 0),
 - **Artifacts** has `eval-results-<run_id>.zip` with `results/summary.csv`,
-  `results/runs/<stamp>/` (per-run logs), and the harness reports.
+  `results/runs/<stamp>/` (including `progress.json`, raw per-cell timings, and
+  `timing_summary.json`), plus the harness reports.
+
+The eval driver automatically sizes separate agent and Docker-scoring pools for
+the current EC2 CPU, available RAM, and disk. Runs persist an atomic manifest;
+if a job or instance is interrupted, copy the printed command
+`python -m eval.run_eval --resume <run-id>` and run it from the same checkout and
+results volume. See [PARALLEL_EVAL.md](PARALLEL_EVAL.md) for manual worker
+overrides, live elapsed-time monitoring, phase-based tuning, configuration
+matrices, and the paid serial/parallel benchmark.
+
+For an archived performance comparison, use **Actions →
+parallel-eval-benchmark → Run workflow**. `budget_per_arm` applies separately to
+the serial and parallel arms, so the maximum agent spend is twice that input.
+The workflow uploads both run manifests/log sets and the JSON report, and places
+the report in the GitHub Actions job summary.
 
 ## Cost hygiene
 - The self-hosted runner only consumes EC2 time while a job runs, but the

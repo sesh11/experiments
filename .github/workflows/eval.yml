@@ -23,7 +23,8 @@ on:
         required: true
 
 concurrency:
-  # Never run two scoring jobs on the same box at once (shared Docker/disk).
+  # Never run two independent eval workflows on the same box. One workflow's
+  # resource-aware scheduler safely manages its own parallel scoring cells.
   group: eval-${{ github.ref }}
   cancel-in-progress: false
 

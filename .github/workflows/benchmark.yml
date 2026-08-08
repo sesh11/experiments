@@ -1,0 +1,96 @@
+name: parallel-eval-benchmark
+
+# Paid, opt-in serial-versus-parallel benchmark on the same self-hosted x86_64
+# EC2 runner used by eval.yml. Each arm gets the budget entered below.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Gold-verified SWE-bench instances to compare"
+        default: "5"
+        required: true
+      budget_per_arm:
+        description: "Dollar cap for EACH arm (total possible spend is 2x)"
+        default: "10"
+        required: true
+      variants:
+        description: "Space-separated registered variants"
+        default: "frontier_only scout"
+        required: true
+      parallel_workers:
+        description: "Parallel agent workers: auto or N"
+        default: "auto"
+        required: true
+      parallel_docker_workers:
+        description: "Parallel Docker scorers: auto or N"
+        default: "auto"
+        required: true
+
+concurrency:
+  group: eval-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse ARM and report host resources
+        run: |
+          test "$(uname -m)" = "x86_64" || {
+            echo "::error::Benchmark requires an x86_64 runner"
+            exit 1
+          }
+          nproc
+          free -h
+          df -h . /var/lib/docker || true
+
+      - name: Prepare Python environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet -U pip
+          .venv/bin/pip install --quiet -r requirements.txt pytest
+
+      - name: Verify scoring and pin the benchmark instances
+        run: |
+          mkdir -p results
+          .venv/bin/python -m eval.selftest_scoring --backend docker \
+            --limit "${{ inputs.limit }}" --out results/verified_instances.txt
+
+      - name: Run paid serial and parallel arms
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          read -r -a variants <<< "${{ inputs.variants }}"
+          .venv/bin/python scripts/benchmark_parallel.py \
+            --instance-ids-file results/verified_instances.txt \
+            --variants "${variants[@]}" \
+            --budget "${{ inputs.budget_per_arm }}" \
+            --parallel-workers "${{ inputs.parallel_workers }}" \
+            --parallel-docker-workers "${{ inputs.parallel_docker_workers }}"
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          report="$(ls -1t results/benchmark_*.json 2>/dev/null | head -1 || true)"
+          if [ -n "$report" ]; then
+            echo "## Parallel evaluation benchmark" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No benchmark report was produced; inspect the job log._" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload run manifests, logs, and benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parallel-eval-benchmark-${{ github.run_id }}
+          path: |
+            results/
+          if-no-files-found: warn
+          retention-days: 30

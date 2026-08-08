@@ -5,11 +5,12 @@ pi is driven as a subprocess in JSON mode with its own default tool surface
 Hermetic flags disable sessions, extensions, skills, and CLAUDE.md discovery
 so runs are reproducible and never touch the user's pi setup.
 
-Accounting is post-hoc: pi has no turn-limit flag, so the wall-clock timeout
-(cfg.runtime_timeout_s) is the in-flight guard; token totals are summed from
-the JSON stream at session end and recorded once. Cost is recomputed from
-pinned pricing — pi's own figure (kept in extra["pi_reported_cost_usd"]) uses
-its bundled registry, which may not know newer model ids.
+pi has no turn-limit flag, so the wall-clock timeout (cfg.runtime_timeout_s)
+remains an in-flight guard. Usage is monitored from the live JSON stream and pi
+is stopped before another full-context request could exceed the cell cap. Token
+totals are consolidated into the shared ledger at session end. Cost is
+recomputed from pinned pricing — pi's own figure (kept in
+extra["pi_reported_cost_usd"]) may use different registry prices.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+import threading
+from pathlib import Path
 
 from fusion import config
 from fusion.llm import Ledger
@@ -73,28 +77,96 @@ class PiRuntime:
             "--no-prompt-templates", "--no-themes", "--no-context-files",
             task_prompt(task),
         ]
-        timed_out = False
-        try:
-            proc = subprocess.run(
-                cmd, cwd=ws.root, capture_output=True, text=True,
-                timeout=cfg.runtime_timeout_s, env=os.environ.copy(),
+        # pi only reports usage in its JSON event stream. Read that stream live
+        # and stop before another turn when a full-context request could exceed
+        # the cell cap. This converts the former post-hoc-only guard into a hard
+        # bound with one request's maximum reserved before every next turn.
+        next_call_ceiling = (
+            config.absolute_request_cost_upper_bound(
+                routed_model, max_output_tokens=cfg.max_tokens)
+            if config.has_pinned_price(routed_model) else None
+        )
+        if next_call_ceiling is not None:
+            ledger.ensure_capacity(next_call_ceiling)
+        timed_out = [False]
+        budget_stopped = False
+        lines: list[str] = []
+        live_cost = 0.0
+        pi_config_dir = Path(ws.root) / ".fusion_pi"
+        pi_config_dir.mkdir(exist_ok=True)
+        (pi_config_dir / "models.json").write_text(json.dumps({
+            "providers": {
+                cfg.provider: {
+                    "modelOverrides": {
+                        routed_model: {"maxTokens": cfg.max_tokens}
+                    }
+                }
+            }
+        }))
+        pi_env = os.environ.copy()
+        pi_env["PI_CODING_AGENT_DIR"] = str(pi_config_dir)
+        pi_env["PI_CODING_AGENT_SESSION_DIR"] = str(pi_config_dir / "sessions")
+        with tempfile.TemporaryFile(mode="w+") as err_file:
+            proc = subprocess.Popen(
+                cmd, cwd=ws.root, stdout=subprocess.PIPE, stderr=err_file,
+                text=True, env=pi_env,
             )
-            stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
-            returncode = -1
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode(errors="replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
+
+            def kill_on_timeout() -> None:
+                if proc.poll() is None:
+                    timed_out[0] = True
+                    proc.kill()
+
+            timer = threading.Timer(cfg.runtime_timeout_s, kill_on_timeout)
+            timer.daemon = True
+            timer.start()
+            assert proc.stdout is not None
+            try:
+                for line in proc.stdout:
+                    lines.append(line)
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") != "message_end":
+                        continue
+                    msg = event.get("message", {})
+                    if msg.get("role") != "assistant":
+                        continue
+                    usage = msg.get("usage", {})
+                    if config.has_pinned_price(routed_model):
+                        live_cost += config.cost_for(
+                            routed_model,
+                            input_tokens=int(usage.get("input", 0) or 0),
+                            output_tokens=int(usage.get("output", 0) or 0),
+                            cache_read_tokens=int(usage.get("cacheRead", 0) or 0),
+                            cache_write_tokens=int(usage.get("cacheWrite", 0) or 0),
+                        )
+                    else:
+                        live_cost += float(
+                            (usage.get("cost") or {}).get("total", 0) or 0)
+                    if (msg.get("stopReason") != "stop"
+                            and next_call_ceiling is not None
+                            and live_cost + next_call_ceiling > ledger.cap_usd):
+                        budget_stopped = True
+                        proc.terminate()
+                        break
+                returncode = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                returncode = proc.wait()
+            finally:
+                timer.cancel()
+                proc.stdout.close()
+            err_file.seek(0)
+            stderr = err_file.read()
+        stdout = "".join(lines)
 
         events = _parse_events(stdout)
         totals, pi_cost, steps, last_text, last_stop, api_error = _digest(events)
         role = "main" if model == cfg.main_model else "sidekick"
-        # Post-hoc accounting: one record for the whole session, cost from
-        # pinned pricing. May raise BudgetExceeded (caught by the orchestrator).
+        # Consolidate the live-observed stream into the shared ledger using
+        # pinned pricing (the scheduler only consumes this common interface).
         ledger.record_tokens(
             role, routed_model,
             input_tokens=totals["input"], output_tokens=totals["output"],
@@ -109,12 +181,22 @@ class PiRuntime:
         extra = {
             "pi_reported_cost_usd": round(pi_cost, 6),
             "recomputed_cost_usd": round(recomputed, 6),
+            "budget_enforcement": (
+                "live-event-stream" if next_call_ceiling is not None
+                else "provider-reported-post-call"
+            ),
         }
         if pi_cost and abs(pi_cost - recomputed) / max(recomputed, 1e-9) > 0.10:
-            print(f"    ! pi self-reported cost ${pi_cost:.4f} deviates >10% "
-                  f"from pinned-pricing recompute ${recomputed:.4f} "
-                  f"(pi's registry may not know '{routed_model}')")
-        if timed_out:
+            extra["pricing_warning"] = (
+                f"pi self-reported cost ${pi_cost:.4f} deviates >10% from "
+                f"pinned-pricing recompute ${recomputed:.4f} "
+                f"(pi's registry may not know '{routed_model}')")
+        if budget_stopped:
+            from fusion.llm import BudgetExceeded
+            raise BudgetExceeded(
+                f"pi stopped before its next turn could exceed the "
+                f"${ledger.cap_usd:.2f} cell cap (spent ${ledger.total_cost:.2f})")
+        if timed_out[0]:
             raise TimeoutError(
                 f"pi hit the {cfg.runtime_timeout_s}s wall-clock cap "
                 f"(usage recorded: {totals})")
