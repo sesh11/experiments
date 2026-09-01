@@ -117,13 +117,135 @@ def test_openrouter_adapter_converts_tool_transcript_and_usage() -> None:
         "role": "tool", "tool_call_id": "call-1", "content": "x = 1",
     }
     assert sent["tools"][0]["function"]["parameters"]["type"] == "object"
-    assert sent["extra_body"] == {"reasoning": {"effort": "none"}}
+    assert sent["extra_body"] == {
+        "reasoning": {"effort": "none"},
+        "cache_control": {"type": "ephemeral"},
+    }
     assert result.content[0].text == "done"
     assert result.usage == CompletionUsage(
         input_tokens=20, output_tokens=9,
         cache_write_tokens=20, cache_read_tokens=60,
         cost_usd=0.0123,
     )
+
+
+def test_anthropic_adapter_rolls_cache_breakpoints_across_the_transcript() -> None:
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="done")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1,
+                              cache_creation_input_tokens=0,
+                              cache_read_input_tokens=0),
+    )
+    client, recorder = anthropic_client(response)
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "read_file", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "x = 1"},
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c2", "name": "read_file", "input": {}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c2", "content": "x = 2"},
+        ]},
+    ]
+    AnthropicProvider(client).complete(
+        model="claude-sonnet-5", system="system", messages=messages,
+        tools=None, thinking=None, max_tokens=100,
+    )
+
+    sent = recorder.kwargs["messages"]
+    marked = [i for i, m in enumerate(sent)
+              if isinstance(m["content"], list)
+              and "cache_control" in m["content"][-1]]
+    assert marked == [3, 4]
+    assert sent[4]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # The agent's own transcript must stay provider-neutral and reusable.
+    assert messages[4]["content"][-1] == {
+        "type": "tool_result", "tool_use_id": "c2", "content": "x = 2",
+    }
+
+
+def test_anthropic_breakpoints_advance_as_the_agent_transcript_grows() -> None:
+    calls: list[list] = []
+
+    class Client:
+        def create(self, **kwargs):
+            calls.append(kwargs["messages"])
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="ok")],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1,
+                                      cache_creation_input_tokens=0,
+                                      cache_read_input_tokens=0),
+            )
+
+    adapter = AnthropicProvider(SimpleNamespace(messages=Client()))
+    messages: list = [{"role": "user", "content": [{"type": "text", "text": "go"}]}]
+    for turn in range(3):
+        adapter.complete(model="claude-sonnet-5", system="s", messages=messages,
+                         tools=None, thinking=None, max_tokens=10)
+        messages.append({"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"c{turn}", "name": "read_file", "input": {}},
+        ]})
+        messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"c{turn}", "content": "x"},
+        ]})
+
+    marked = [[i for i, m in enumerate(sent)
+               if "cache_control" in m["content"][-1]] for sent in calls]
+    assert marked == [[0], [1, 2], [3, 4]]
+
+
+def test_anthropic_adapter_skips_uncacheable_blocks() -> None:
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="done")],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1,
+                              cache_creation_input_tokens=0,
+                              cache_read_input_tokens=0),
+    )
+    client, recorder = anthropic_client(response)
+    AnthropicProvider(client).complete(
+        model="claude-sonnet-5", system="system",
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": "inspect"}]},
+            {"role": "assistant", "content": [{"type": "thinking",
+                                              "thinking": "..."}]},
+            # A plain string turn cannot carry a breakpoint.
+            {"role": "user", "content": "continue"},
+        ],
+        tools=None, thinking=None, max_tokens=100,
+    )
+
+    sent = recorder.kwargs["messages"]
+    assert sent[2] == {"role": "user", "content": "continue"}
+    assert "cache_control" not in sent[1]["content"][-1]
+    assert sent[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_openrouter_omits_auto_cache_for_non_anthropic_models() -> None:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(
+                content="done", tool_calls=None, reasoning_details=None),
+        )],
+        usage=SimpleNamespace(
+            prompt_tokens=1, completion_tokens=1, cost=0,
+            prompt_tokens_details=None,
+        ),
+    )
+    client, recorder = openrouter_client(response)
+    OpenRouterProvider(client=client).complete(
+        model="openai/gpt-5", system="s", messages=[], tools=None,
+        thinking=None, max_tokens=20,
+    )
+    assert "extra_body" not in recorder.kwargs
 
 
 def test_openrouter_adapter_normalizes_tool_calls() -> None:

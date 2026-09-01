@@ -158,6 +158,47 @@ class Ledger:
         return out
 
 
+CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+# Anthropic reads its prompt cache only up to the newest breakpoint, so a
+# transcript with a marker on the system block alone re-bills every tool result
+# at the full input rate on each turn. Four explicit breakpoints are allowed;
+# the system block takes one and two rolling markers on the newest blocks keep
+# the previous prefix warm while the newest turn is being written.
+TRANSCRIPT_BREAKPOINTS = 2
+
+# Blocks Anthropic accepts a breakpoint on; notably excludes thinking blocks.
+_CACHEABLE_BLOCKS = frozenset({"text", "tool_use", "tool_result", "image",
+                               "document"})
+
+
+def _cached_transcript(messages: list, limit: int = TRANSCRIPT_BREAKPOINTS) -> list:
+    """Copy of ``messages`` with cache breakpoints on its newest blocks.
+
+    The caller's provider-neutral transcript is never mutated: only the touched
+    messages and their last content block are copied.
+    """
+    out = list(messages)
+    marked = 0
+    for index in range(len(out) - 1, -1, -1):
+        if marked >= limit:
+            break
+        message = out[index]
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list) or not content:
+            continue
+        block = content[-1]
+        if not isinstance(block, dict) or block.get("type") not in _CACHEABLE_BLOCKS:
+            continue
+        marked += 1
+        if "cache_control" in block:
+            continue
+        blocks = list(content)
+        blocks[-1] = {**block, "cache_control": dict(CACHE_CONTROL)}
+        out[index] = {**message, "content": blocks}
+    return out
+
+
 class ProviderAdapter(Protocol):
     def complete(self, *, model: str, system: str, messages: list,
                  tools: list | None, thinking: dict | None,
@@ -188,9 +229,9 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             "system": [{
                 "type": "text", "text": system,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": dict(CACHE_CONTROL),
             }],
-            "messages": messages,
+            "messages": _cached_transcript(messages),
         }
         if tools:
             kwargs["tools"] = tools
@@ -265,12 +306,21 @@ def _openrouter_reasoning(thinking: dict | None) -> dict | None:
     return None
 
 
+def _supports_auto_cache(model: str) -> bool:
+    """Whether OpenRouter will honor a top-level ``cache_control`` field.
+
+    Automatic caching is an Anthropic-family feature there; sending the field
+    to an unrelated provider risks a rejected request.
+    """
+    return "claude" in model.lower()
+
+
 def _openrouter_messages(system: str, messages: list) -> list[dict]:
     converted: list[dict] = [{
         "role": "system",
         "content": [{
             "type": "text", "text": system,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": dict(CACHE_CONTROL),
         }],
     }]
     for message in messages:
@@ -360,9 +410,18 @@ class OpenRouterProvider:
         }
         if tools:
             kwargs["tools"] = [_tool_schema(tool) for tool in tools]
+        extra_body: dict[str, Any] = {}
         reasoning = _openrouter_reasoning(thinking)
         if reasoning is not None:
-            kwargs["extra_body"] = {"reasoning": reasoning}
+            extra_body["reasoning"] = reasoning
+        # The chat-completions transcript flattens tool results into string
+        # `tool` messages, which carry no per-block breakpoint. OpenRouter's
+        # top-level field caches up to the last cacheable block instead and
+        # advances that breakpoint as the transcript grows.
+        if _supports_auto_cache(model):
+            extra_body["cache_control"] = dict(CACHE_CONTROL)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         response = self._client.chat.completions.create(**kwargs)
         embedded_error = getattr(response, "error", None)
         if embedded_error:
