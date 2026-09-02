@@ -115,6 +115,12 @@ python -m eval.run_eval --source native \
 ```
 
 Cost-comparability caveats:
+* **fusion** marks the system prompt plus the two newest transcript blocks with
+  `cache_control`, so each turn re-reads the prior turns at cache-read prices
+  instead of re-billing them as fresh input. Anthropic will not cache a prefix
+  below its per-model minimum (1,024 tokens for Sonnet, 4,096 for Haiku 4.5), so
+  short sidekick contexts still show no cache reads. On OpenRouter the same
+  effect uses its top-level automatic `cache_control`, which is Claude-only.
 * **Stirrup** reports no cache split, so all its input tokens are billed at the
   full input rate (conservative overestimate), and its litellm path does no
   prompt caching — expect ~2x fusion's cost on small tasks. OpenRouter routing
