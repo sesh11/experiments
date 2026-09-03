@@ -306,6 +306,15 @@ def _openrouter_reasoning(thinking: dict | None) -> dict | None:
     return None
 
 
+def _mandatory_reasoning(error: Exception) -> bool:
+    """Whether a request failed only because reasoning cannot be disabled.
+
+    Reasoning-only endpoints (GLM, some hosted open-weight models) reject the
+    disable request outright rather than ignoring it.
+    """
+    return "reasoning is mandatory" in str(error).lower()
+
+
 def _supports_auto_cache(model: str) -> bool:
     """Whether OpenRouter will honor a top-level ``cache_control`` field.
 
@@ -422,7 +431,17 @@ class OpenRouterProvider:
             extra_body["cache_control"] = dict(CACHE_CONTROL)
         if extra_body:
             kwargs["extra_body"] = extra_body
-        response = self._client.chat.completions.create(**kwargs)
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not (reasoning == {"effort": "none"} and _mandatory_reasoning(exc)):
+                raise
+            # Run with the endpoint's own reasoning default. Output tokens are
+            # then not comparable to a thinking-off arm on another model.
+            del extra_body["reasoning"]
+            if not extra_body:
+                kwargs.pop("extra_body")
+            response = self._client.chat.completions.create(**kwargs)
         embedded_error = getattr(response, "error", None)
         if embedded_error:
             raise ProviderResponseError(f"OpenRouter error: {embedded_error}")
