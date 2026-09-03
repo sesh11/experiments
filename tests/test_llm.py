@@ -248,7 +248,7 @@ def test_openrouter_omits_auto_cache_for_non_anthropic_models() -> None:
     assert "extra_body" not in recorder.kwargs
 
 
-def test_openrouter_retries_without_reasoning_when_it_cannot_be_disabled() -> None:
+def test_openrouter_falls_back_to_minimal_reasoning_when_none_is_refused() -> None:
     response = SimpleNamespace(
         choices=[SimpleNamespace(
             finish_reason="stop",
@@ -268,7 +268,7 @@ def test_openrouter_retries_without_reasoning_when_it_cannot_be_disabled() -> No
 
         def create(self, **kwargs):
             self.sent.append(dict(kwargs.get("extra_body") or {}) or None)
-            if "reasoning" in kwargs.get("extra_body", {}):
+            if kwargs["extra_body"]["reasoning"] == {"effort": "none"}:
                 raise RuntimeError(
                     "Error code: 400 - Reasoning is mandatory for this endpoint "
                     "and cannot be disabled."
@@ -281,7 +281,9 @@ def test_openrouter_retries_without_reasoning_when_it_cannot_be_disabled() -> No
         model="z-ai/glm-5.3", system="s", messages=[], tools=None,
         thinking={"type": "disabled"}, max_tokens=20,
     )
-    assert recorder.sent == [{"reasoning": {"effort": "none"}}, None]
+    assert recorder.sent == [
+        {"reasoning": {"effort": "none"}}, {"reasoning": {"effort": "minimal"}},
+    ]
     assert result.content[0].text == "done"
 
 

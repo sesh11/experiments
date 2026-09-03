@@ -306,12 +306,14 @@ def _openrouter_reasoning(thinking: dict | None) -> dict | None:
     return None
 
 
-def _mandatory_reasoning(error: Exception) -> bool:
-    """Whether a request failed only because reasoning cannot be disabled.
+# OpenRouter rejects `effort: none` for reasoning-native models before routing
+# to a host, so no provider choice avoids it. The lowest effort it does accept
+# still returns zero reasoning tokens in practice, which is the parity we want.
+MINIMAL_REASONING: dict[str, str] = {"effort": "minimal"}
 
-    Reasoning-only endpoints (GLM, some hosted open-weight models) reject the
-    disable request outright rather than ignoring it.
-    """
+
+def _mandatory_reasoning(error: Exception) -> bool:
+    """Whether a request failed only because reasoning cannot be disabled."""
     return "reasoning is mandatory" in str(error).lower()
 
 
@@ -436,11 +438,7 @@ class OpenRouterProvider:
         except Exception as exc:
             if not (reasoning == {"effort": "none"} and _mandatory_reasoning(exc)):
                 raise
-            # Run with the endpoint's own reasoning default. Output tokens are
-            # then not comparable to a thinking-off arm on another model.
-            del extra_body["reasoning"]
-            if not extra_body:
-                kwargs.pop("extra_body")
+            extra_body["reasoning"] = dict(MINIMAL_REASONING)
             response = self._client.chat.completions.create(**kwargs)
         embedded_error = getattr(response, "error", None)
         if embedded_error:
