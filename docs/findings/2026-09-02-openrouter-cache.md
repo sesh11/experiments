@@ -89,5 +89,7 @@ member on quality; its arm cost has to be measured, not extrapolated from its
 sticker rate. Reasoning effort has to be recorded per arm — at n=1 it is the
 largest cost lever observed so far.
 
-Endpoint probe scripts and their raw output are not committed; the counts above
-come from `results/runs/glmcheck2` and `glmcheck3`.
+Token counts above come from `results/runs/glmcheck2` and `glmcheck3`. The
+provenance of the reasoning refusal and of explicit cache control — which layer
+owns each, probed across all 25 hosts serving glm-5.3 — is
+`2026-09-03-cache-control-provenance.md`.
