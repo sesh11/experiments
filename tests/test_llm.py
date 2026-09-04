@@ -248,6 +248,59 @@ def test_openrouter_omits_auto_cache_for_non_anthropic_models() -> None:
     assert "extra_body" not in recorder.kwargs
 
 
+def test_openrouter_falls_back_to_minimal_reasoning_when_none_is_refused() -> None:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(
+                content="done", tool_calls=None, reasoning_details=None),
+        )],
+        usage=SimpleNamespace(
+            prompt_tokens=1, completion_tokens=1, cost=0,
+            prompt_tokens_details=None,
+        ),
+    )
+
+    class RefusesDisabledReasoning(Recorder):
+        def __init__(self, response) -> None:
+            super().__init__(response)
+            self.sent: list[dict] = []
+
+        def create(self, **kwargs):
+            self.sent.append(dict(kwargs.get("extra_body") or {}) or None)
+            if kwargs["extra_body"]["reasoning"] == {"effort": "none"}:
+                raise RuntimeError(
+                    "Error code: 400 - Reasoning is mandatory for this endpoint "
+                    "and cannot be disabled."
+                )
+            return super().create(**kwargs)
+
+    recorder = RefusesDisabledReasoning(response)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=recorder))
+    result = OpenRouterProvider(client=client).complete(
+        model="z-ai/glm-5.3", system="s", messages=[], tools=None,
+        thinking={"type": "disabled"}, max_tokens=20,
+    )
+    assert recorder.sent == [
+        {"reasoning": {"effort": "none"}}, {"reasoning": {"effort": "minimal"}},
+    ]
+    assert result.content[0].text == "done"
+
+
+def test_openrouter_propagates_errors_unrelated_to_reasoning() -> None:
+    class AlwaysFails(Recorder):
+        def create(self, **kwargs):
+            raise RuntimeError("Error code: 402 - insufficient credits")
+
+    recorder = AlwaysFails(None)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=recorder))
+    with pytest.raises(RuntimeError, match="insufficient credits"):
+        OpenRouterProvider(client=client).complete(
+            model="z-ai/glm-5.3", system="s", messages=[], tools=None,
+            thinking={"type": "disabled"}, max_tokens=20,
+        )
+
+
 def test_openrouter_adapter_normalizes_tool_calls() -> None:
     response = SimpleNamespace(
         choices=[SimpleNamespace(
